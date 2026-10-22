@@ -2,8 +2,8 @@
 测试混合检索模块
 
 运行前请确保：
-1. Neo4j 与 Milvus 服务已启动（见第1讲）
-2. 已按第3讲完成图数据准备、第4讲完成Milvus索引构建
+1. Neo4j 与 Milvus 服务已启动
+2. 完成图数据准备、第4讲完成Milvus索引构建
 3. .env 中已配置 OPENAI_API_KEY / OPENAI_BASE_URL（LLM 用于提取关键词）
 """
 

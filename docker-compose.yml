@@ -5,7 +5,7 @@ services:
   # Neo4j 图数据库
   neo4j:
     image: neo4j:5.11-community
-    container_name: what-to-eat-neo4j
+    container_name: cookwise-ai-neo4j
     environment:
       - NEO4J_AUTH=neo4j/all-in-rag
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
@@ -33,7 +33,7 @@ services:
   # Milvus 向量数据库依赖服务
   milvus-etcd:
     image: quay.io/coreos/etcd:v3.5.5
-    container_name: what-to-eat-milvus-etcd
+    container_name: cookwise-ai-milvus-etcd
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
       - ETCD_AUTO_COMPACTION_RETENTION=1000
@@ -52,7 +52,7 @@ services:
   milvus-minio:
     # MinIO 社区版镜像已从 Docker Hub / quay.io 下线，改用本地可用的官方镜像
     image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-    container_name: what-to-eat-milvus-minio
+    container_name: cookwise-ai-milvus-minio
     environment:
       # MINIO_ACCESS_KEY / MINIO_SECRET_KEY 为新版已移除的旧变量名，改用 ROOT_USER / ROOT_PASSWORD
       MINIO_ROOT_USER: minioadmin
@@ -73,7 +73,7 @@ services:
   # Milvus 向量数据库
   milvus-standalone:
     image: milvusdb/milvus:v2.3.2
-    container_name: what-to-eat-milvus-standalone
+    container_name: cookwise-ai-milvus-standalone
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: milvus-etcd:2379
@@ -99,7 +99,7 @@ services:
   # Neo4j 数据自动导入服务
   neo4j-init:
     image: neo4j:5.11-community
-    container_name: what-to-eat-neo4j-init
+    container_name: cookwise-ai-neo4j-init
     environment:
       - NEO4J_AUTH=neo4j/all-in-rag
     volumes:
@@ -126,7 +126,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: what-to-eat-backend
+    container_name: cookwise-ai-backend
     environment:
       - PYTHONPATH=/app
       - DOCKER_ENV=true
@@ -137,10 +137,10 @@ services:
       - MILVUS_PORT=19530
       # 模型配置
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
-      - LLM_MODEL=${LLM_MODEL:-moonshot-v1-8k}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-flash}
       # 统一API配置
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.moonshot.cn/v1}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.deepseek.com}
     ports:
       - "8000:8000"
     volumes:
@@ -168,7 +168,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       target: runner
-    container_name: what-to-eat-frontend
+    container_name: cookwise-ai-frontend
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_API_URL=http://localhost:8000
@@ -180,7 +180,8 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/ || exit 1"]
+      # runner 镜像基于 node:18-alpine，不含 curl；用 Node 内置 fetch 做探针
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -190,7 +191,7 @@ services:
   # Nginx 反向代理
   nginx:
     image: nginx:alpine
-    container_name: what-to-eat-nginx
+    container_name: cookwise-ai-nginx
     ports:
       - "80:80"
     volumes:
@@ -217,4 +218,4 @@ volumes:
 
 networks:
   default:
-    name: what-to-eat-network
+    name: cookwise-ai-network

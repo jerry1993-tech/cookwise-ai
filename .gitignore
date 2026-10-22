@@ -12,6 +12,12 @@ venv/
 .pytest_cache/
 .mypy_cache/
 
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
 # macOS
 .DS_Store
 
