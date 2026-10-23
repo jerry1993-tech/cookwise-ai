@@ -4,8 +4,10 @@ FROM python:3.11-slim
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
+# 安装系统依赖（APT_MIRROR 可在构建时覆盖为国内镜像）
+ARG APT_MIRROR=deb.debian.org
+RUN sed -i "s#deb.debian.org#${APT_MIRROR}#g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
@@ -13,8 +15,12 @@ RUN apt-get update && apt-get install -y \
 # 复制 requirements 文件
 COPY requirements.txt .
 
-# 安装 Python 依赖
-RUN pip install --no-cache-dir -r requirements.txt
+# 安装 Python 依赖（可通过构建参数切换国内镜像和 CPU 版 torch）
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_EXTRA_INDEX_URL=
+RUN pip install --no-cache-dir --index-url ${PIP_INDEX_URL} \
+    ${PIP_EXTRA_INDEX_URL:+--extra-index-url ${PIP_EXTRA_INDEX_URL}} \
+    -r requirements.txt
 
 # 复制源代码
 COPY . .
@@ -22,6 +28,9 @@ COPY . .
 # 创建非root用户
 RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
+
+# 嵌入模型缓存目录（具名卷挂载点，需 app 用户可写）
+RUN mkdir -p /home/app/.cache/huggingface && chown -R app:app /home/app
 USER app
 
 # 暴露端口
@@ -33,7 +42,7 @@ ENV PYTHONUNBUFFERED=1
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 # 启动命令
 CMD ["python", "main.py"]

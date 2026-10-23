@@ -20,8 +20,8 @@ services:
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
-      - neo4j_import:/var/lib/neo4j/import
-      - ./data/cypher:/import
+      # LOAD CSV 使用 file:/// 路径，直接挂载到 Neo4j 的 import 目录
+      - ./data/cypher:/var/lib/neo4j/import
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p all-in-rag 'RETURN 1'"]
       interval: 10s
@@ -126,10 +126,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-}
+        APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
     container_name: cookwise-ai-backend
     environment:
       - PYTHONPATH=/app
       - DOCKER_ENV=true
+      # 嵌入模型下载源与缓存（缓存持久化避免重启后重复下载）
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
+      - HF_HOME=/home/app/.cache/huggingface
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=all-in-rag
@@ -149,6 +156,7 @@ services:
       - ./config.py:/app/config.py
       - ./main.py:/app/main.py
       - ./requirements.txt:/app/requirements.txt
+      - hf_cache:/home/app/.cache/huggingface
     depends_on:
       neo4j-init:
         condition: service_completed_successfully
@@ -158,8 +166,9 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 120s
+      retries: 20
+      # 首次启动需下载嵌入模型并构建向量索引，留足时间
+      start_period: 600s
     restart: unless-stopped
 
   # Next.js 前端服务
@@ -211,7 +220,7 @@ services:
 volumes:
   neo4j_data:
   neo4j_logs:
-  neo4j_import:
+  hf_cache:
   etcd_data:
   minio_data:
   milvus_data:
