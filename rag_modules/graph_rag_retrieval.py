@@ -3,12 +3,28 @@
 基于图结构的知识推理和检索，而非简单的关键词匹配。
 
 预览：
-这个文件定义了一个类 `GraphRAGRetrieval`，它是图RAG检索的核心。对外它主要提供三个「入口」方法：
+本模块按单一职责拆成若干能力组件，由末尾的 `GraphRAGRetrieval` 门面组合（多继承）而成。
+对外接口与拆分前完全一致，仍主要提供三个「入口」方法：
 1. `initialize()`：连接 Neo4j 并预热图索引（后续所有图操作都靠它建立的 `self.driver`）。
 2. `graph_rag_search(query, top_k)`：主搜索接口。内部完整走一遍「理解意图 → 按类型分发 → 图结构排序」的流程，最后返回一批 `Document` 对象。
 3. `understand_graph_query(query)`：单独把「意图理解」这一步暴露出来，方便测试和路由器复用。
-内部还藏着一整套「发动机」：`multi_hop_traversal`（多跳遍历）、`extract_knowledge_subgraph`（子图提取）、
-`graph_structure_reasoning`（图推理）、`adaptive_query_planning`（自适应规划），以及一票下划线开头的辅助方法。
+
+能力组件划分（每个类只负责一件事，方法体与拆分前逐字一致）：
+- `GraphStoreMixin`：连接生命周期、只读 Cypher、节点/关系序列化、度数补齐、身份键与关系去重。
+- `GraphIndexMixin`：图索引预热、实体名规范化、同族别名对齐、候选实体抽取、种子节点解析。
+- `QueryUnderstandingMixin`：自然语言 → `GraphQuery`（LLM + 本地降级）、复杂度分析与自适应查询规划。
+- `PathModelMixin`：`GraphPath` 的构建、评分、搭配证据读取、去重与 Neo4j 记录解析。
+- `GraphTraversalMixin`：多跳遍历主引擎（深度/种子收口、变长路径、搭配共现通道）。
+- `PathQueryMixin`：实体关系、最短路径、相似实体三条定向查询策略。
+- `SubgraphExtractionMixin`：两阶段知识子图抽取、行组装、缓存淘汰与三级降级。
+- `GraphReasoningMixin`：识别子图拓扑模式，构造并校验可溯源的推理链。
+- `DocumentFormattingMixin`：把路径/子图渲染为自然语言描述与 `Document`，并计算图结构分。
+- `ResultRankingMixin`：词法 + 图结构 + 类型先验 + 可溯源程度的四分量融合排序。
+- `GraphRAGRetrieval`：门面，持有共享状态并串联主检索流程；子类可覆盖任一组件实现替换（热插拔）。
+
+组件之间不持有彼此的实例：共享状态（driver / 各类缓存 / 索引）统一由门面在 `__init__` 中建立，
+各方法只通过 `self` 协作。因此组件的依赖面就是门面暴露的这几个状态与同职责方法，
+新增或替换一个组件时不需要改其他组件，也不需要改上层调用方。
 
 ===============================================================================
 实现说明（写给维护者）
@@ -471,47 +487,11 @@ class KnowledgeSubgraph:
     graph_metrics: Dict[str, float]
     reasoning_chains: List[List[str]]
 
-class GraphRAGRetrieval:
-    """
-    真正的图RAG检索系统
-    核心特点：
-    1. 查询意图理解：识别图查询模式
-    2. 多跳图遍历：深度关系探索
-    3. 子图提取：相关知识网络
-    4. 图结构推理：基于拓扑的推理
-    5. 动态查询规划：自适应遍历策略
-    """
 
-    def __init__(self, config, llm_client):
-        self.config = config
-        self.llm_client = llm_client
-        self.driver = None
+class GraphStoreMixin:
+    """图存储访问：连接生命周期、只读 Cypher、节点/关系序列化、度数补齐与关系去重。
 
-        # 图结构缓存
-        self.entity_cache = {}
-        self.relation_cache = {}
-        self.subgraph_cache = {}
-
-        # 意图理解结果缓存：key = 原始查询串，value = GraphQuery。
-        # 同一个问题常被路由器与生成阶段反复问到，缓存可省掉重复的 LLM 调用。
-        self._query_understanding_cache: Dict[str, "GraphQuery"] = {}
-
-        # 实体名 -> nodeId 列表 的反向索引，由 _build_graph_index 预热，用于把自然语言里的实体名快速落到图谱节点上
-        self._name_index: Dict[str, List[str]] = defaultdict(list)
-
-        # 【属性值词表】菜系（Recipe.cuisineType）、分类（category）这类【只作为属性存在】的值。
-        # 它们在图谱里没有同名节点（实测「川菜」不存在同名节点，只存在于 33 个 Recipe 的 cuisineType），
-        # 因此不在 _name_index 里；但 _resolve_seed_nodes 的属性分支【能】匹配到它们。
-        # 单独一张表而不是混进 _name_index：后者的契约是"名称 -> nodeId"，混入属性值会污染别名定位。
-        self._vocab_phrases: Set[str] = set()
-
-        # 子图缓存的插入顺序，用于容量超限时做 FIFO 淘汰（无需引入额外依赖）
-        self._subgraph_cache_order: deque = deque()
-
-        # 最近一次多跳扩展【实际使用】的深度（由 _expand_multi_hop_paths 回填）。
-        # 请求深度与实际深度可能不同（种子度数会让深度降级），而"兜底查询是否与主路径等价"
-        # 必须按实际深度判断，否则会原样重跑一遍刚跑过的查询。
-        self._last_effective_depth: Optional[int] = None
+    所有 Neo4j 访问都收口在这里，其他组件只通过 self 使用这些能力。"""
 
     def initialize(self):
         """初始化图RAG检索系统"""
@@ -542,10 +522,6 @@ class GraphRAGRetrieval:
 
         # 预热：构建实体和关系索引
         self._build_graph_index()
-
-    # -------------------------------------------------------------------------
-    # 基础设施：连接判定、安全查询、节点/关系序列化
-    # -------------------------------------------------------------------------
 
     def _discard_driver(self) -> None:
         """关闭并丢弃当前 driver（连接失败或初始化异常时的统一收口）。
@@ -880,9 +856,23 @@ class GraphRAGRetrieval:
             logger.info(f"关系跨阶段去重：移除 {dropped} 条重复边（{len(relationships)} -> {len(deduped)}）")
         return deduped
 
-    # -------------------------------------------------------------------------
-    # 图索引与实体解析
-    # -------------------------------------------------------------------------
+    def close(self):
+        """关闭资源连接。
+
+        【为什么必须置空 driver】_is_driver_ready() 的判据就是 `driver is not None`，
+        而它自身的 docstring 声明的契约是"driver 非 None 等价于 initialize 时探测成功过"。
+        只 close 不置空时该契约被破坏：close() 之后 _is_driver_ready() 仍返回 True，
+        5 个查询点会继续走 Cypher 分支，逐条记 ERROR "Cypher 执行失败: Driver closed"，
+        关闭后的行为既不可观测又与"连接不可用"的降级语义不一致。
+        这里统一收口到 _discard_driver()，与 initialize() 失败路径口径完全一致（关闭 + 置空）。
+        """
+        if hasattr(self, 'driver') and self.driver:
+            self._discard_driver()
+            logger.info("图RAG检索系统已关闭")
+
+
+class GraphIndexMixin:
+    """实体词表与种子解析：预热图索引、规范化实体名、同族别名对齐、候选实体抽取与种子节点解析。"""
 
     def _build_graph_index(self):
         """构建图索引以加速查询"""
@@ -1437,9 +1427,9 @@ class GraphRAGRetrieval:
             logger.info(f"种子节点解析走内存兜底，命中 {len(seeds)} 个")
         return seeds
 
-    # -------------------------------------------------------------------------
-    # 意图理解
-    # -------------------------------------------------------------------------
+
+class QueryUnderstandingMixin:
+    """查询理解与规划：把自然语言转成受约束的 GraphQuery（LLM + 本地降级），评估复杂度并生成检索计划。"""
 
     def understand_graph_query(self, query: str) -> GraphQuery:
         """
@@ -1693,9 +1683,257 @@ class GraphRAGRetrieval:
             max_nodes=50,
         )
 
-    # -------------------------------------------------------------------------
-    # 多跳遍历
-    # -------------------------------------------------------------------------
+    def adaptive_query_planning(self, query: str) -> List[GraphQuery]:
+        """
+        自适应查询规划：根据查询复杂度动态调整策略
+        """
+        # 分析查询复杂度
+        complexity_score = self._analyze_query_complexity(query)
+
+        # 先把查询解析成图谱里真实存在的实体名，避免把整句查询当成实体导致全程空转
+        candidates = self._candidate_entities_from_query(query)
+
+        query_plans = []
+
+        if complexity_score < _COMPLEXITY_SIMPLE:
+            # 简单查询：直接邻居查询
+            plan = GraphQuery(
+                query_type=QueryType.ENTITY_RELATION,
+                source_entities=candidates,
+                max_depth=1,
+                max_nodes=20
+            )
+            query_plans.append(plan)
+
+        elif complexity_score < _COMPLEXITY_MEDIUM:
+            # 中等复杂度：多跳查询
+            plan = GraphQuery(
+                query_type=QueryType.MULTI_HOP,
+                source_entities=candidates,
+                max_depth=2,
+                max_nodes=50
+            )
+            query_plans.append(plan)
+
+        else:
+            # 复杂查询：子图提取 + 推理
+            plan1 = GraphQuery(
+                query_type=QueryType.SUBGRAPH,
+                source_entities=candidates,
+                max_depth=3,
+                max_nodes=100
+            )
+            plan2 = GraphQuery(
+                query_type=QueryType.MULTI_HOP,
+                source_entities=candidates,
+                max_depth=3,
+                max_nodes=50
+            )
+            query_plans.extend([plan1, plan2])
+
+        return query_plans
+
+    def _analyze_query_complexity(self, query: str) -> float:
+        """分析查询复杂度，返回 [0,1] 的分数，供 adaptive_query_planning 选择遍历深度。
+
+        四个加权分量（合计 1.0），设计目标是让「简单实体查询」与「多跳推理查询」拉开可观测的差距：
+          - 长度分量 (0.25)：长查询通常承载更多约束；
+          - 多跳模式分量 (0.35)：命中 _MULTI_HOP_PATTERNS（如「配什么」「为什么」「类似」）越多越复杂；
+          - 多实体连接词分量 (0.30)：出现「和 / 跟 / 还是」等说明在同时谈多个对象；
+          - 标点分量 (0.10)：多分句、多问句代表复合意图。
+        该分数还与 GraphRAGConfig.max_graph_depth 的语义保持一致（上限同为 3 跳）。
+        """
+        text = _coerce_query_text(query)
+        if not text.strip():
+            return 0.0
+
+        # 1) 长度分量：以 60 字为饱和点
+        length_score = min(len(text) / 60.0, 1.0) * _COMPLEXITY_WEIGHT_LENGTH
+
+        # 2) 多跳模式分量：命中 2 个即视为饱和
+        multihop_hits = sum(1 for pattern in _MULTI_HOP_PATTERNS if re.search(pattern, text))
+        multihop_score = min(multihop_hits / 2.0, 1.0) * _COMPLEXITY_WEIGHT_MULTIHOP
+
+        # 3) 多实体连接词分量：命中 2 个即视为饱和
+        connective_hits = sum(1 for cue in _CONNECTIVE_CUES if cue in text)
+        connective_score = min(connective_hits / 2.0, 1.0) * _COMPLEXITY_WEIGHT_CONNECTIVE
+
+        # 4) 标点分量：逗号/顿号/问号累计 3 个即视为饱和
+        punct_hits = text.count("，") + text.count("、") + text.count("？") + text.count("?") + text.count("；")
+        punct_score = min(punct_hits / 3.0, 1.0) * _COMPLEXITY_WEIGHT_PUNCT
+
+        return round(min(length_score + multihop_score + connective_score + punct_score, 1.0), 4)
+
+
+class PathModelMixin:
+    """路径模型：GraphPath 的构建、相关性评分、搭配证据读取、去重与 Neo4j 记录解析。"""
+
+    def _score_path(self, path: GraphPath) -> float:
+        """给一条图路径打相关性分。
+
+        三个分量（权重合计 1.0）：
+          - 关系语义强度 (0.5)：路径上各关系类型权重的均值，体现「这条路径说的话是否靠谱」；
+          - 路径紧凑度 (0.3)：1/(1+跳数)，越短越可信（间接关联噪声更大）；
+          - 节点信息量 (0.2)：路径节点度数的归一化均值，避免全是孤立叶子节点的路径。
+        """
+        if not path.relationships:
+            rel_strength = _DEFAULT_RELATION_WEIGHT
+        else:
+            weights = [
+                _RELATION_WEIGHTS.get(str(r.get("type") or ""), _DEFAULT_RELATION_WEIGHT)
+                for r in path.relationships
+            ]
+            rel_strength = sum(weights) / float(len(weights))
+
+        compactness = 1.0 / (1.0 + max(int(path.path_length or 1), 1))
+
+        if path.nodes:
+            degree_score = sum(min(int(n.get("degree") or 0) / 50.0, 1.0) for n in path.nodes) / float(len(path.nodes))
+        else:
+            degree_score = 0.0
+
+        score = 0.5 * rel_strength + 0.3 * compactness + 0.2 * degree_score
+        return round(float(score), 6)
+
+    def _pairing_support(self, path: GraphPath) -> Tuple[int, int]:
+        """读取路径上的搭配共现证据。
+
+        证据写在【关系字典】上（见 _expand_pairing_paths）：pairing_support = 共现菜谱数，
+        pairing_source_names = 该搭配覆盖的同族食材名数。
+        一条路径上可能有多条关系带该字段，取最大值；任何异常（类型不符）都按"无证据"处理，
+        因为这里只是加分/展示的依据，不值得为脏数据中断检索。
+
+        Returns:
+            (共现菜谱数, 同族食材名数)；无证据时为 (0, 0)
+        """
+        support, src_count = 0, 0
+        for rel in (path.relationships or []):
+            try:
+                support = max(support, int(rel.get("pairing_support") or 0))
+                src_count = max(src_count, int(rel.get("pairing_source_names") or 0))
+            except (TypeError, ValueError):
+                continue
+        return support, src_count
+
+    def _pairing_support_bonus(self, path: GraphPath) -> float:
+        """把搭配共现强度折成一个【有界】的结构证据加成，取值 [0, _PAIRING_SUPPORT_BONUS]。
+
+        为什么是"结构证据"而不是词法证据：结构完全相同的 食材-菜谱-食材 路径（2 跳、两条 REQUIRES）
+        在 _score_path / _path_struct_score 里拿到的是【完全相同】的分数，
+        唯一能区分"鸡肉配姜很常见"和"鸡肉配欧芹只出现一次"的信号就是共现菜谱数，
+        它衡量的是图谱里这条关联的强度，属于结构侧。
+        上限存在的原因：避免高频搭配压过一切其它证据，也让同分时退回稳定排序的输入顺序。
+        """
+        support, _ = self._pairing_support(path)
+        if support <= 0:
+            return 0.0
+        return _PAIRING_SUPPORT_BONUS * min(float(support) / _PAIRING_SUPPORT_SATURATION, 1.0)
+
+    def _build_graph_path(self, nodes: List[Dict[str, Any]], rels: List[Dict[str, Any]],
+                          path_type: str, path_length: Optional[int] = None) -> Optional[GraphPath]:
+        """把节点/关系字典组装成 GraphPath，并做统一的脏数据过滤。
+
+        返回 None 表示这条路径不该进入结果集（节点为空、或混入了统计/占位脏节点）。
+        """
+        # 过滤掉统计/层次节点与占位节点；只要混入一个，整条路径即为脏路径
+        clean_nodes = [n for n in nodes if self._is_meaningful_node(n)]
+        if not clean_nodes or len(clean_nodes) != len(nodes):
+            return None
+
+        if len(clean_nodes) == 1 and not rels:
+            # 单节点无关系无法构成路径
+            return None
+
+        return GraphPath(
+            nodes=clean_nodes,
+            relationships=list(rels or []),
+            path_length=int(path_length if path_length is not None else max(len(clean_nodes) - 1, 1)),
+            relevance_score=0.0,   # 由 _score_path 统一回填，保证评分口径一致
+            path_type=path_type,
+        )
+
+    def _dedup_paths(self, paths: List[GraphPath]) -> List[GraphPath]:
+        """按「节点序列」去重，保留相关性最高的那条。
+
+        Cypher 的无向多跳匹配会对同一批节点产出方向/顺序不同的重复路径，必须去重否则 top_k 会被挤占。
+        """
+        best: Dict[Tuple[str, ...], GraphPath] = {}
+        for path in paths:
+            if not path or not path.nodes:
+                continue
+            key = tuple(str(n.get("id") or n.get("name") or "") for n in path.nodes)
+            if key not in best or path.relevance_score > best[key].relevance_score:
+                best[key] = path
+        ordered = sorted(best.values(), key=lambda p: p.relevance_score, reverse=True)
+        return ordered[:_MAX_PATH_RESULTS]
+
+    def _parse_neo4j_path(self, record) -> Optional[GraphPath]:
+        """解析Neo4j路径记录。
+
+        支持两种形态：
+          - 含 "path" 键的 neo4j Path 对象（推荐形态，能拿到真实方向与关系类型）；
+          - 早期版本的 path_nodes / rels / path_len / relevance 扁平键（保留兼容）。
+        关系类型一律通过 _rel_to_dict 读取（内部使用驱动的 rel.type），
+        避免早期 `type(rel).__name__` 只得到 'Relationship' 的缺陷。
+        """
+        try:
+            if record.get("path") is not None:
+                neo_path = record["path"]
+                nodes = [self._node_to_dict(n) for n in neo_path.nodes]
+                rels = [self._rel_to_dict(r) for r in neo_path.relationships]
+                length = len(rels)
+                relevance = record.get("relevance")
+                # 查询里带了 relevance（例如全文/向量侧已经打过分的图路径）就直接沿用，
+                # 否则交回 _score_path 统一评分，保证同一批结果的分数量纲一致
+                if isinstance(relevance, (int, float)):
+                    return GraphPath(
+                        nodes=nodes,
+                        relationships=rels,
+                        path_length=length,
+                        relevance_score=float(relevance),
+                        path_type="multi_hop",
+                    )
+                built = self._build_graph_path(
+                    nodes=nodes, rels=rels, path_type="multi_hop",
+                    path_length=length if length else None,
+                )
+                if built is not None:
+                    built.relevance_score = self._score_path(built)
+                return built
+
+            # 兼容路径：扁平键形态
+            path_nodes = []
+            for node in (record.get("path_nodes") or []):
+                if isinstance(node, dict):
+                    path_nodes.append(node)
+                else:
+                    path_nodes.append(self._node_to_dict(node))
+
+            relationships = []
+            for rel in (record.get("rels") or []):
+                if isinstance(rel, dict):
+                    relationships.append(rel)
+                elif isinstance(rel, list):
+                    relationships.extend([self._rel_to_dict(item) for item in rel])
+                else:
+                    relationships.append(self._rel_to_dict(rel))
+
+            relevance = record.get("relevance")
+            return GraphPath(
+                nodes=path_nodes,
+                relationships=relationships,
+                path_length=int(record.get("path_len") or max(len(path_nodes) - 1, 1)),
+                relevance_score=float(relevance) if isinstance(relevance, (int, float)) else 0.0,
+                path_type="multi_hop"
+            )
+
+        except Exception as e:
+            logger.error(f"路径解析失败: {e}")
+            return None
+
+
+class GraphTraversalMixin:
+    """多跳遍历：按查询类型分发，负责深度/种子收口、通用变长路径与搭配共现通道。"""
 
     def multi_hop_traversal(self, graph_query: GraphQuery) -> List[GraphPath]:
         """
@@ -1822,6 +2060,156 @@ class GraphRAGRetrieval:
         if len(seeds) > len(selected):
             logger.info(f"深遍历种子数由 {len(seeds)} 收敛为 {len(selected)}（其余种子成本线性叠加但结果高度重叠）")
         return selected
+
+    def _expand_multi_hop_paths(self, graph_query: GraphQuery, session,
+                                depth: int) -> List[GraphPath]:
+        """受限多跳扩展：本模块多跳检索的主力实现。
+
+        为什么不用「一次性把 N 跳全查出来」：
+        实测从单个菜谱出发的变长路径 1 跳 35 条、2 跳 698 条、3 跳【127214 条】，
+        因此这里做了五层收口：
+          1. 深度钳制在 [_MAX_TRAVERSAL_DEPTH] 以内，并以字面量内插（Neo4j 不允许参数化上界）；
+          2. Cypher 内过滤标签白名单与占位脏节点，把统计/层次节点排除在路径之外；
+          3. Cypher 内 LIMIT 控制单次返回规模，再在 Python 侧做 hub 剪枝（度数超阈值的中间节点剔除），
+             因为把 COUNT{(n)--()} 放进路径匹配里逐节点求值代价过高，不如取回后批量补度数再剪；
+          4. 【种子侧也要收口】：hub 剪枝原本只作用于路径的"中间节点"，而种子是端点、从不被检查。
+             实测把度数 511 的 CookingStep '步骤3'（图谱里存在大量同名步骤节点）当种子做 3 跳展开，
+             VarLengthExpand 会枚举 1,395,178 行、耗时 6.7-9.7s，而 LIMIT 60 只能截断【返回】不能截断【枚举】。
+             所以这里按种子的最大度数主动降级深度（见 _effective_depth_for_seeds），
+             并限制参与深展开的种子个数（见 _MAX_DEEP_SEED_COUNT）——多种子是线性叠加的枚举成本，
+             实测 5 个种子做 3 跳展开要 4.4s，而结果同样是那 60 条。
+          5. 目标实体约束走「名称/标签/分类/菜系」多字段语义匹配，而不是错误的 labels() 直比。
+          6. 【本方法有两条通道，共用一份路径预算】：
+             - 搭配共现通道（_expand_pairing_paths）：把"X 配什么 Y"这类问句解释为
+               「X 与 Y 经由同一个菜谱共现」，直接用 食材-菜谱-食材 的结构化两跳回答，
+               并按共现菜谱数排序。它按【名字】锚定源侧，因此同名反规范化副本全部参与，
+               不受 _MAX_DEEP_SEED_COUNT 限制。
+             - 通用变长路径通道（本方法主体）：回答"通过什么连到"这类开放问句。
+             预算分配是【搭配通道优先】：通用通道的 LIMIT 是"最短路径优先"，
+             1 跳路径（食材→菜谱）会把 LIMIT 全部吃掉，2 跳的"食材→菜谱→食材"根本排不进来。
+             实测「鸡肉配什么蔬菜好？」改造前只返回 2 条路径（都来自同一个菜谱），
+             搭配通道介入后返回 27 种蔬菜。
+        """
+        seeds = self._resolve_seed_nodes(graph_query.source_entities, limit=5, session=session)
+        if not seeds:
+            logger.info(f"多跳扩展未解析出种子节点: {graph_query.source_entities}")
+            return []
+
+        # 种子侧的两道收口（顺序重要：先按度数决定深度，再按深度决定用几个种子）
+        depth = self._effective_depth_for_seeds(seeds, depth)
+        # 回填"本次实际使用的深度"：调用方（multi_hop_traversal）靠它判断兜底查询是否与主路径等价
+        self._last_effective_depth = depth
+        seed_ids = self._select_expansion_seeds(seeds, depth)
+        target_keywords = self._normalize_target_keywords(graph_query.target_entities)
+        rel_types = [r for r in (graph_query.relation_types or []) if r in _RELATION_WEIGHTS]
+        effective_rel_types = rel_types or list(_RELATION_WEIGHTS.keys())
+
+        # 【搭配共现通道】先跑，并且它的产出【先从总预算里扣除】（见预算分配的注释）。
+        # 触发条件三选全满足才跑：
+        #   - depth >= 2：1 跳只能答"这个食材属于哪个类目"，答不了"和谁搭配"；
+        #   - target_keywords 非空：搭配通道的目标侧收敛完全依赖关键词，没有关键词就退化成全量共现；
+        #   - 种子里有 Ingredient：源侧要按名字锚定，全是菜谱/步骤种子时这条通道无意义。
+        pairing_paths: List[GraphPath] = []
+        if depth >= 2 and target_keywords and any(
+                "Ingredient" in (s.get("labels") or []) for s in seeds):
+            pairing_paths = self._expand_pairing_paths(
+                graph_query, session, seeds, target_keywords,
+                budget=max(_PAIRING_MIN_RESULTS,
+                           int(_MAX_PATH_RESULTS * _PAIRING_BUDGET_RATIO)),
+            )
+            if len(pairing_paths) < _PAIRING_MIN_RESULTS:
+                # 命中太少说明这条问句不是"搭配"型（或图谱里确实没有共现），
+                # 与其塞几条弱证据进去污染排序，不如整条通道退场、把预算还给通用通道。
+                logger.info(f"搭配共现命中 {len(pairing_paths)} 条，低于阈值 {_PAIRING_MIN_RESULTS}，放弃该通道")
+                pairing_paths = []
+
+        # 预算分配：搭配路径【优先占用】总预算，通用变长路径只拿剩下的部分。
+        # 为什么必须让路：通用通道的 LIMIT 是"最短路径优先"（ORDER BY path_len ASC），
+        # 1 跳路径（食材->菜谱）会把 LIMIT 全部吃掉，2 跳的"食材->菜谱->食材"根本排不进来 ——
+        # 这正是改造前「鸡肉配什么蔬菜」只返回 2 条路径的直接原因。
+        # 剩额为 0 时干脆不跑通用查询：省掉一次 680ms 级的枚举，且不会产出任何会被丢弃的结果。
+        generic_limit = max(_MAX_PATH_RESULTS - len(pairing_paths), 0)
+        if generic_limit == 0:
+            logger.info(f"搭配共现已占满路径预算（{len(pairing_paths)} 条），跳过通用变长路径查询")
+            pairing_paths.sort(key=lambda p: p.relevance_score, reverse=True)
+            return pairing_paths
+
+        # 深度以字面量内插：Neo4j 明确拒绝 `[*1..$depth]` 这种参数化上界，
+        # 而 depth 已由 _clamp 与 _effective_depth_for_seeds 保证是 [1,3] 内的整数，不存在注入风险。
+        cypher = f"""
+        MATCH (source) WHERE source.nodeId IN $seed_ids
+        MATCH path = (source)-[*1..{depth}]-(target)
+        WHERE NOT target = source
+          AND all(x IN nodes(path) WHERE ({_PATH_LABEL_FILTER_X}))
+          AND all(x IN nodes(path) WHERE NOT coalesce(x.nodeId, '') IN $placeholder_ids)
+          AND any(r IN relationships(path) WHERE type(r) IN $rel_types)
+          AND ($target_keywords = []
+               OR any(k IN $target_keywords WHERE
+                    toLower(coalesce(target.name, '')) CONTAINS k
+                    OR toLower(coalesce(target.category, '')) CONTAINS k
+                    OR toLower(coalesce(target.cuisineType, '')) CONTAINS k
+                    OR any(lbl IN labels(target) WHERE toLower(lbl) CONTAINS k)))
+        WITH path, length(path) AS path_len, nodes(path) AS pnodes, relationships(path) AS prels
+        ORDER BY path_len ASC
+        LIMIT $limit
+        RETURN pnodes, prels, path_len
+        """
+
+        rows = []
+        try:
+            rows = [dict(record) for record in session.run(cypher, {
+                "seed_ids": seed_ids,
+                "placeholder_ids": list(_PLACEHOLDER_NODE_IDS),
+                "rel_types": effective_rel_types,
+                "target_keywords": target_keywords,
+                "limit": generic_limit,
+            })]
+        except Exception as e:
+            # 通用通道失败不该连带丢掉已经拿到的搭配路径：两者是独立证据源，失败隔离。
+            logger.error(f"多跳路径查询失败: {e}")
+            return pairing_paths
+
+        paths: List[GraphPath] = []
+        for row in rows:
+            path = self._build_graph_path(
+                nodes=[self._node_to_dict(n) for n in (row.get("pnodes") or [])],
+                rels=[self._rel_to_dict(r) for r in (row.get("prels") or [])],
+                path_type="multi_hop",
+            )
+            if path:
+                paths.append(path)
+
+        if not paths:
+            return pairing_paths
+
+        # 统一补齐度数后再剪枝：hub 剪枝与结构评分都依赖度数
+        all_nodes = [n for p in paths for n in p.nodes]
+        self._attach_degrees(all_nodes)
+
+        pruned: List[GraphPath] = []
+        dropped_hub = 0
+        for path in paths:
+            # 中间节点（非起点、非终点）若为 hub 则整条路径丢弃：
+            # 实测 Category '调料'(1556) 这类 hub 会把任意两个菜谱连起来，属于噪声而非知识
+            intermediates = path.nodes[1:-1]
+            if any(self._is_hub(n) for n in intermediates):
+                dropped_hub += 1
+                continue
+            path.relevance_score = self._score_path(path)
+            pruned.append(path)
+
+        if dropped_hub:
+            logger.info(f"hub 剪枝丢弃 {dropped_hub} 条路径（中间节点度数 > {_HUB_DEGREE_THRESHOLD}）")
+
+        # 合并两条通道的结果。
+        # 搭配路径【不过 hub 剪枝】：它的中间节点按构造就是 Recipe（共现的见证者），
+        # 剪掉它等于剪掉这条通道的全部语义；而且 Recipe 度数实测 3~30，远低于阈值 120，
+        # 真正需要防的 hub（Category '调料' 1556、'蔬菜' 605）根本不会出现在 食材-菜谱-食材 里。
+        # 排序：按 relevance_score 降序，同分时 Python 稳定排序保留输入顺序 ——
+        # 这里把搭配路径排在前面，所以同分优先保留搭配证据（它是本问句的直接答案）。
+        merged = pairing_paths + pruned
+        merged.sort(key=lambda p: p.relevance_score, reverse=True)
+        return merged[:_MAX_PATH_RESULTS]
 
     def _expand_pairing_paths(self, graph_query: GraphQuery, session,
                               seeds: List[Dict[str, Any]],
@@ -2004,254 +2392,9 @@ class GraphRAGRetrieval:
         )
         return paths[:budget]
 
-    def _expand_multi_hop_paths(self, graph_query: GraphQuery, session,
-                                depth: int) -> List[GraphPath]:
-        """受限多跳扩展：本模块多跳检索的主力实现。
 
-        为什么不用「一次性把 N 跳全查出来」：
-        实测从单个菜谱出发的变长路径 1 跳 35 条、2 跳 698 条、3 跳【127214 条】，
-        因此这里做了五层收口：
-          1. 深度钳制在 [_MAX_TRAVERSAL_DEPTH] 以内，并以字面量内插（Neo4j 不允许参数化上界）；
-          2. Cypher 内过滤标签白名单与占位脏节点，把统计/层次节点排除在路径之外；
-          3. Cypher 内 LIMIT 控制单次返回规模，再在 Python 侧做 hub 剪枝（度数超阈值的中间节点剔除），
-             因为把 COUNT{(n)--()} 放进路径匹配里逐节点求值代价过高，不如取回后批量补度数再剪；
-          4. 【种子侧也要收口】：hub 剪枝原本只作用于路径的"中间节点"，而种子是端点、从不被检查。
-             实测把度数 511 的 CookingStep '步骤3'（图谱里存在大量同名步骤节点）当种子做 3 跳展开，
-             VarLengthExpand 会枚举 1,395,178 行、耗时 6.7-9.7s，而 LIMIT 60 只能截断【返回】不能截断【枚举】。
-             所以这里按种子的最大度数主动降级深度（见 _effective_depth_for_seeds），
-             并限制参与深展开的种子个数（见 _MAX_DEEP_SEED_COUNT）——多种子是线性叠加的枚举成本，
-             实测 5 个种子做 3 跳展开要 4.4s，而结果同样是那 60 条。
-          5. 目标实体约束走「名称/标签/分类/菜系」多字段语义匹配，而不是错误的 labels() 直比。
-          6. 【本方法有两条通道，共用一份路径预算】：
-             - 搭配共现通道（_expand_pairing_paths）：把"X 配什么 Y"这类问句解释为
-               「X 与 Y 经由同一个菜谱共现」，直接用 食材-菜谱-食材 的结构化两跳回答，
-               并按共现菜谱数排序。它按【名字】锚定源侧，因此同名反规范化副本全部参与，
-               不受 _MAX_DEEP_SEED_COUNT 限制。
-             - 通用变长路径通道（本方法主体）：回答"通过什么连到"这类开放问句。
-             预算分配是【搭配通道优先】：通用通道的 LIMIT 是"最短路径优先"，
-             1 跳路径（食材→菜谱）会把 LIMIT 全部吃掉，2 跳的"食材→菜谱→食材"根本排不进来。
-             实测「鸡肉配什么蔬菜好？」改造前只返回 2 条路径（都来自同一个菜谱），
-             搭配通道介入后返回 27 种蔬菜。
-        """
-        seeds = self._resolve_seed_nodes(graph_query.source_entities, limit=5, session=session)
-        if not seeds:
-            logger.info(f"多跳扩展未解析出种子节点: {graph_query.source_entities}")
-            return []
-
-        # 种子侧的两道收口（顺序重要：先按度数决定深度，再按深度决定用几个种子）
-        depth = self._effective_depth_for_seeds(seeds, depth)
-        # 回填"本次实际使用的深度"：调用方（multi_hop_traversal）靠它判断兜底查询是否与主路径等价
-        self._last_effective_depth = depth
-        seed_ids = self._select_expansion_seeds(seeds, depth)
-        target_keywords = self._normalize_target_keywords(graph_query.target_entities)
-        rel_types = [r for r in (graph_query.relation_types or []) if r in _RELATION_WEIGHTS]
-        effective_rel_types = rel_types or list(_RELATION_WEIGHTS.keys())
-
-        # 【搭配共现通道】先跑，并且它的产出【先从总预算里扣除】（见预算分配的注释）。
-        # 触发条件三选全满足才跑：
-        #   - depth >= 2：1 跳只能答"这个食材属于哪个类目"，答不了"和谁搭配"；
-        #   - target_keywords 非空：搭配通道的目标侧收敛完全依赖关键词，没有关键词就退化成全量共现；
-        #   - 种子里有 Ingredient：源侧要按名字锚定，全是菜谱/步骤种子时这条通道无意义。
-        pairing_paths: List[GraphPath] = []
-        if depth >= 2 and target_keywords and any(
-                "Ingredient" in (s.get("labels") or []) for s in seeds):
-            pairing_paths = self._expand_pairing_paths(
-                graph_query, session, seeds, target_keywords,
-                budget=max(_PAIRING_MIN_RESULTS,
-                           int(_MAX_PATH_RESULTS * _PAIRING_BUDGET_RATIO)),
-            )
-            if len(pairing_paths) < _PAIRING_MIN_RESULTS:
-                # 命中太少说明这条问句不是"搭配"型（或图谱里确实没有共现），
-                # 与其塞几条弱证据进去污染排序，不如整条通道退场、把预算还给通用通道。
-                logger.info(f"搭配共现命中 {len(pairing_paths)} 条，低于阈值 {_PAIRING_MIN_RESULTS}，放弃该通道")
-                pairing_paths = []
-
-        # 预算分配：搭配路径【优先占用】总预算，通用变长路径只拿剩下的部分。
-        # 为什么必须让路：通用通道的 LIMIT 是"最短路径优先"（ORDER BY path_len ASC），
-        # 1 跳路径（食材->菜谱）会把 LIMIT 全部吃掉，2 跳的"食材->菜谱->食材"根本排不进来 ——
-        # 这正是改造前「鸡肉配什么蔬菜」只返回 2 条路径的直接原因。
-        # 剩额为 0 时干脆不跑通用查询：省掉一次 680ms 级的枚举，且不会产出任何会被丢弃的结果。
-        generic_limit = max(_MAX_PATH_RESULTS - len(pairing_paths), 0)
-        if generic_limit == 0:
-            logger.info(f"搭配共现已占满路径预算（{len(pairing_paths)} 条），跳过通用变长路径查询")
-            pairing_paths.sort(key=lambda p: p.relevance_score, reverse=True)
-            return pairing_paths
-
-        # 深度以字面量内插：Neo4j 明确拒绝 `[*1..$depth]` 这种参数化上界，
-        # 而 depth 已由 _clamp 与 _effective_depth_for_seeds 保证是 [1,3] 内的整数，不存在注入风险。
-        cypher = f"""
-        MATCH (source) WHERE source.nodeId IN $seed_ids
-        MATCH path = (source)-[*1..{depth}]-(target)
-        WHERE NOT target = source
-          AND all(x IN nodes(path) WHERE ({_PATH_LABEL_FILTER_X}))
-          AND all(x IN nodes(path) WHERE NOT coalesce(x.nodeId, '') IN $placeholder_ids)
-          AND any(r IN relationships(path) WHERE type(r) IN $rel_types)
-          AND ($target_keywords = []
-               OR any(k IN $target_keywords WHERE
-                    toLower(coalesce(target.name, '')) CONTAINS k
-                    OR toLower(coalesce(target.category, '')) CONTAINS k
-                    OR toLower(coalesce(target.cuisineType, '')) CONTAINS k
-                    OR any(lbl IN labels(target) WHERE toLower(lbl) CONTAINS k)))
-        WITH path, length(path) AS path_len, nodes(path) AS pnodes, relationships(path) AS prels
-        ORDER BY path_len ASC
-        LIMIT $limit
-        RETURN pnodes, prels, path_len
-        """
-
-        rows = []
-        try:
-            rows = [dict(record) for record in session.run(cypher, {
-                "seed_ids": seed_ids,
-                "placeholder_ids": list(_PLACEHOLDER_NODE_IDS),
-                "rel_types": effective_rel_types,
-                "target_keywords": target_keywords,
-                "limit": generic_limit,
-            })]
-        except Exception as e:
-            # 通用通道失败不该连带丢掉已经拿到的搭配路径：两者是独立证据源，失败隔离。
-            logger.error(f"多跳路径查询失败: {e}")
-            return pairing_paths
-
-        paths: List[GraphPath] = []
-        for row in rows:
-            path = self._build_graph_path(
-                nodes=[self._node_to_dict(n) for n in (row.get("pnodes") or [])],
-                rels=[self._rel_to_dict(r) for r in (row.get("prels") or [])],
-                path_type="multi_hop",
-            )
-            if path:
-                paths.append(path)
-
-        if not paths:
-            return pairing_paths
-
-        # 统一补齐度数后再剪枝：hub 剪枝与结构评分都依赖度数
-        all_nodes = [n for p in paths for n in p.nodes]
-        self._attach_degrees(all_nodes)
-
-        pruned: List[GraphPath] = []
-        dropped_hub = 0
-        for path in paths:
-            # 中间节点（非起点、非终点）若为 hub 则整条路径丢弃：
-            # 实测 Category '调料'(1556) 这类 hub 会把任意两个菜谱连起来，属于噪声而非知识
-            intermediates = path.nodes[1:-1]
-            if any(self._is_hub(n) for n in intermediates):
-                dropped_hub += 1
-                continue
-            path.relevance_score = self._score_path(path)
-            pruned.append(path)
-
-        if dropped_hub:
-            logger.info(f"hub 剪枝丢弃 {dropped_hub} 条路径（中间节点度数 > {_HUB_DEGREE_THRESHOLD}）")
-
-        # 合并两条通道的结果。
-        # 搭配路径【不过 hub 剪枝】：它的中间节点按构造就是 Recipe（共现的见证者），
-        # 剪掉它等于剪掉这条通道的全部语义；而且 Recipe 度数实测 3~30，远低于阈值 120，
-        # 真正需要防的 hub（Category '调料' 1556、'蔬菜' 605）根本不会出现在 食材-菜谱-食材 里。
-        # 排序：按 relevance_score 降序，同分时 Python 稳定排序保留输入顺序 ——
-        # 这里把搭配路径排在前面，所以同分优先保留搭配证据（它是本问句的直接答案）。
-        merged = pairing_paths + pruned
-        merged.sort(key=lambda p: p.relevance_score, reverse=True)
-        return merged[:_MAX_PATH_RESULTS]
-
-    def _score_path(self, path: GraphPath) -> float:
-        """给一条图路径打相关性分。
-
-        三个分量（权重合计 1.0）：
-          - 关系语义强度 (0.5)：路径上各关系类型权重的均值，体现「这条路径说的话是否靠谱」；
-          - 路径紧凑度 (0.3)：1/(1+跳数)，越短越可信（间接关联噪声更大）；
-          - 节点信息量 (0.2)：路径节点度数的归一化均值，避免全是孤立叶子节点的路径。
-        """
-        if not path.relationships:
-            rel_strength = _DEFAULT_RELATION_WEIGHT
-        else:
-            weights = [
-                _RELATION_WEIGHTS.get(str(r.get("type") or ""), _DEFAULT_RELATION_WEIGHT)
-                for r in path.relationships
-            ]
-            rel_strength = sum(weights) / float(len(weights))
-
-        compactness = 1.0 / (1.0 + max(int(path.path_length or 1), 1))
-
-        if path.nodes:
-            degree_score = sum(min(int(n.get("degree") or 0) / 50.0, 1.0) for n in path.nodes) / float(len(path.nodes))
-        else:
-            degree_score = 0.0
-
-        score = 0.5 * rel_strength + 0.3 * compactness + 0.2 * degree_score
-        return round(float(score), 6)
-
-    def _pairing_support(self, path: GraphPath) -> Tuple[int, int]:
-        """读取路径上的搭配共现证据。
-
-        证据写在【关系字典】上（见 _expand_pairing_paths）：pairing_support = 共现菜谱数，
-        pairing_source_names = 该搭配覆盖的同族食材名数。
-        一条路径上可能有多条关系带该字段，取最大值；任何异常（类型不符）都按"无证据"处理，
-        因为这里只是加分/展示的依据，不值得为脏数据中断检索。
-
-        Returns:
-            (共现菜谱数, 同族食材名数)；无证据时为 (0, 0)
-        """
-        support, src_count = 0, 0
-        for rel in (path.relationships or []):
-            try:
-                support = max(support, int(rel.get("pairing_support") or 0))
-                src_count = max(src_count, int(rel.get("pairing_source_names") or 0))
-            except (TypeError, ValueError):
-                continue
-        return support, src_count
-
-    def _pairing_support_bonus(self, path: GraphPath) -> float:
-        """把搭配共现强度折成一个【有界】的结构证据加成，取值 [0, _PAIRING_SUPPORT_BONUS]。
-
-        为什么是"结构证据"而不是词法证据：结构完全相同的 食材-菜谱-食材 路径（2 跳、两条 REQUIRES）
-        在 _score_path / _path_struct_score 里拿到的是【完全相同】的分数，
-        唯一能区分"鸡肉配姜很常见"和"鸡肉配欧芹只出现一次"的信号就是共现菜谱数，
-        它衡量的是图谱里这条关联的强度，属于结构侧。
-        上限存在的原因：避免高频搭配压过一切其它证据，也让同分时退回稳定排序的输入顺序。
-        """
-        support, _ = self._pairing_support(path)
-        if support <= 0:
-            return 0.0
-        return _PAIRING_SUPPORT_BONUS * min(float(support) / _PAIRING_SUPPORT_SATURATION, 1.0)
-
-    def _build_graph_path(self, nodes: List[Dict[str, Any]], rels: List[Dict[str, Any]],
-                          path_type: str, path_length: Optional[int] = None) -> Optional[GraphPath]:
-        """把节点/关系字典组装成 GraphPath，并做统一的脏数据过滤。
-
-        返回 None 表示这条路径不该进入结果集（节点为空、或混入了统计/占位脏节点）。
-        """
-        # 过滤掉统计/层次节点与占位节点；只要混入一个，整条路径即为脏路径
-        clean_nodes = [n for n in nodes if self._is_meaningful_node(n)]
-        if not clean_nodes or len(clean_nodes) != len(nodes):
-            return None
-
-        if len(clean_nodes) == 1 and not rels:
-            # 单节点无关系无法构成路径
-            return None
-
-        return GraphPath(
-            nodes=clean_nodes,
-            relationships=list(rels or []),
-            path_length=int(path_length if path_length is not None else max(len(clean_nodes) - 1, 1)),
-            relevance_score=0.0,   # 由 _score_path 统一回填，保证评分口径一致
-            path_type=path_type,
-        )
-
-    def _dedup_paths(self, paths: List[GraphPath]) -> List[GraphPath]:
-        """按「节点序列」去重，保留相关性最高的那条。
-
-        Cypher 的无向多跳匹配会对同一批节点产出方向/顺序不同的重复路径，必须去重否则 top_k 会被挤占。
-        """
-        best: Dict[Tuple[str, ...], GraphPath] = {}
-        for path in paths:
-            if not path or not path.nodes:
-                continue
-            key = tuple(str(n.get("id") or n.get("name") or "") for n in path.nodes)
-            if key not in best or path.relevance_score > best[key].relevance_score:
-                best[key] = path
-        ordered = sorted(best.values(), key=lambda p: p.relevance_score, reverse=True)
-        return ordered[:_MAX_PATH_RESULTS]
+class PathQueryMixin:
+    """定向路径查询：实体关系、最短路径与相似实体三条策略的具体实现。"""
 
     def _find_entity_relations(self, graph_query: GraphQuery, session) -> List[GraphPath]:
         """查找实体间关系（ENTITY_RELATION 分支的真实实现）。
@@ -2527,6 +2670,10 @@ class GraphRAGRetrieval:
                 return paths[:_MAX_PATH_RESULTS]
 
         return []
+
+
+class SubgraphExtractionMixin:
+    """知识子图：两阶段邻域抽取、行组装、缓存淘汰与三级降级。"""
 
     def extract_knowledge_subgraph(self, graph_query: GraphQuery) -> KnowledgeSubgraph:
         """
@@ -3136,9 +3283,9 @@ class GraphRAGRetrieval:
             reasoning_chains=[]
         )
 
-    # -------------------------------------------------------------------------
-    # 图结构推理
-    # -------------------------------------------------------------------------
+
+class GraphReasoningMixin:
+    """图结构推理：识别子图里真实存在的拓扑模式，构造并校验可溯源的推理链。"""
 
     def graph_structure_reasoning(self, subgraph: KnowledgeSubgraph, query: str) -> List[str]:
         """
@@ -3418,251 +3565,9 @@ class GraphRAGRetrieval:
         # 最多返回 5 条：推理链是给生成模型的辅助证据，过多反而稀释上下文
         return [text for _, text in scored[:5]]
 
-    # -------------------------------------------------------------------------
-    # 自适应查询规划
-    # -------------------------------------------------------------------------
 
-    def adaptive_query_planning(self, query: str) -> List[GraphQuery]:
-        """
-        自适应查询规划：根据查询复杂度动态调整策略
-        """
-        # 分析查询复杂度
-        complexity_score = self._analyze_query_complexity(query)
-
-        # 先把查询解析成图谱里真实存在的实体名，避免把整句查询当成实体导致全程空转
-        candidates = self._candidate_entities_from_query(query)
-
-        query_plans = []
-
-        if complexity_score < _COMPLEXITY_SIMPLE:
-            # 简单查询：直接邻居查询
-            plan = GraphQuery(
-                query_type=QueryType.ENTITY_RELATION,
-                source_entities=candidates,
-                max_depth=1,
-                max_nodes=20
-            )
-            query_plans.append(plan)
-
-        elif complexity_score < _COMPLEXITY_MEDIUM:
-            # 中等复杂度：多跳查询
-            plan = GraphQuery(
-                query_type=QueryType.MULTI_HOP,
-                source_entities=candidates,
-                max_depth=2,
-                max_nodes=50
-            )
-            query_plans.append(plan)
-
-        else:
-            # 复杂查询：子图提取 + 推理
-            plan1 = GraphQuery(
-                query_type=QueryType.SUBGRAPH,
-                source_entities=candidates,
-                max_depth=3,
-                max_nodes=100
-            )
-            plan2 = GraphQuery(
-                query_type=QueryType.MULTI_HOP,
-                source_entities=candidates,
-                max_depth=3,
-                max_nodes=50
-            )
-            query_plans.extend([plan1, plan2])
-
-        return query_plans
-
-    def _analyze_query_complexity(self, query: str) -> float:
-        """分析查询复杂度，返回 [0,1] 的分数，供 adaptive_query_planning 选择遍历深度。
-
-        四个加权分量（合计 1.0），设计目标是让「简单实体查询」与「多跳推理查询」拉开可观测的差距：
-          - 长度分量 (0.25)：长查询通常承载更多约束；
-          - 多跳模式分量 (0.35)：命中 _MULTI_HOP_PATTERNS（如「配什么」「为什么」「类似」）越多越复杂；
-          - 多实体连接词分量 (0.30)：出现「和 / 跟 / 还是」等说明在同时谈多个对象；
-          - 标点分量 (0.10)：多分句、多问句代表复合意图。
-        该分数还与 GraphRAGConfig.max_graph_depth 的语义保持一致（上限同为 3 跳）。
-        """
-        text = _coerce_query_text(query)
-        if not text.strip():
-            return 0.0
-
-        # 1) 长度分量：以 60 字为饱和点
-        length_score = min(len(text) / 60.0, 1.0) * _COMPLEXITY_WEIGHT_LENGTH
-
-        # 2) 多跳模式分量：命中 2 个即视为饱和
-        multihop_hits = sum(1 for pattern in _MULTI_HOP_PATTERNS if re.search(pattern, text))
-        multihop_score = min(multihop_hits / 2.0, 1.0) * _COMPLEXITY_WEIGHT_MULTIHOP
-
-        # 3) 多实体连接词分量：命中 2 个即视为饱和
-        connective_hits = sum(1 for cue in _CONNECTIVE_CUES if cue in text)
-        connective_score = min(connective_hits / 2.0, 1.0) * _COMPLEXITY_WEIGHT_CONNECTIVE
-
-        # 4) 标点分量：逗号/顿号/问号累计 3 个即视为饱和
-        punct_hits = text.count("，") + text.count("、") + text.count("？") + text.count("?") + text.count("；")
-        punct_score = min(punct_hits / 3.0, 1.0) * _COMPLEXITY_WEIGHT_PUNCT
-
-        return round(min(length_score + multihop_score + connective_score + punct_score, 1.0), 4)
-
-    # -------------------------------------------------------------------------
-    # 主检索接口
-    # -------------------------------------------------------------------------
-
-    def graph_rag_search(self, query: str, top_k: int = 5) -> List[Document]:
-        """
-        图RAG主搜索接口：整合所有图RAG能力
-        """
-        logger.info(f"开始图RAG检索: {query}")
-
-        # 【入口防御一：query 必须是字符串】
-        # understand_graph_query 内部会 query.strip()，而它是在下面的 try 之前调用的，
-        # int / list / dict / float 会抛 AttributeError 直接穿透公开入口（实测均复现）。
-        # 检索模块对上层应当是"降级不抛错"的语义，这里统一收口为字符串。
-        query = _coerce_query_text(query)
-
-        # 【入口防御二：top_k 必须钳制成整数】
-        # 此前零校验，直接 results[:top_k]：
-        #   - top_k=None  → 切片键退化为 None，完全不截断，返回底层全部结果（实测 60 条）；
-        #   - top_k 为负  → 按尾部截断，返回近全量（-1 → 59 条）；
-        #   - 字符串/浮点 → 切片抛 TypeError，被下面的兜底 except 吞成 return []，
-        #     把"参数类型错误"伪装成"图里没数据"，调用方无法区分。
-        # 非整数输入记一条 warning 后回退到默认值，越界值钳到 [1, ...) ——
-        # top_k<=0 对检索 API 没有意义，返回 0 条只会让调用方以为"图里没有证据"。
-        try:
-            top_k = int(top_k)
-        except (TypeError, ValueError, OverflowError):
-            logger.warning(f"top_k 非法（{top_k!r}），回退为默认值 5")
-            top_k = 5
-        if top_k < 1:
-            logger.warning(f"top_k={top_k} 无意义（<=0），钳制为 1")
-            top_k = 1
-
-        if not self._is_driver_ready():
-            logger.warning("Neo4j连接未建立，返回空结果")
-            return []
-
-        # 1. 查询意图理解
-        graph_query = self.understand_graph_query(query)
-        logger.info(f"查询类型: {graph_query.query_type.value}")
-
-        results = []
-
-        try:
-            # 2. 根据查询类型执行不同策略
-            if graph_query.query_type in [QueryType.MULTI_HOP, QueryType.PATH_FINDING]:
-                # 多跳遍历
-                paths = self.multi_hop_traversal(graph_query)
-                results.extend(self._paths_to_documents(paths, query))
-
-            elif graph_query.query_type == QueryType.SUBGRAPH:
-                # 子图提取
-                subgraph = self.extract_knowledge_subgraph(graph_query)
-
-                # 图结构推理
-                reasoning_chains = self.graph_structure_reasoning(subgraph, query)
-
-                results.extend(self._subgraph_to_documents(subgraph, reasoning_chains, query))
-
-            elif graph_query.query_type == QueryType.ENTITY_RELATION:
-                # 实体关系查询
-                paths = self.multi_hop_traversal(graph_query)
-                results.extend(self._paths_to_documents(paths, query))
-
-            elif graph_query.query_type == QueryType.CLUSTERING:
-                # 聚类相似查询：走相似实体检索，产出"以相似项为成员"的路径型证据
-                paths = self.multi_hop_traversal(graph_query)
-                results.extend(self._paths_to_documents(paths, query))
-
-            # 2.5 结果回收：若主策略没拿到证据，退一步用子图策略补一次，
-            #     避免「路径分支恰好为空」时对用户静默返回空结果
-            if not results:
-                logger.info("主策略未取得结果，回退到子图检索")
-                subgraph_query = GraphQuery(
-                    query_type=QueryType.SUBGRAPH,
-                    source_entities=graph_query.source_entities,
-                    target_entities=graph_query.target_entities,
-                    max_depth=min(graph_query.max_depth, _MAX_TRAVERSAL_DEPTH),
-                    max_nodes=graph_query.max_nodes,
-                )
-                subgraph = self.extract_knowledge_subgraph(subgraph_query)
-                if subgraph.central_nodes or subgraph.connected_nodes:
-                    reasoning_chains = self.graph_structure_reasoning(subgraph, query)
-                    results.extend(self._subgraph_to_documents(subgraph, reasoning_chains, query))
-
-            # 3. 图结构相关性排序
-            results = self._rank_by_graph_relevance(results, query)
-
-            logger.info(f"图RAG检索完成，返回 {len(results[:top_k])} 个结果")
-            return results[:top_k]
-
-        except Exception as e:
-            logger.error(f"图RAG检索失败: {e}")
-            return []
-
-    # ========== 辅助方法 ==========
-
-    def _parse_neo4j_path(self, record) -> Optional[GraphPath]:
-        """解析Neo4j路径记录。
-
-        支持两种形态：
-          - 含 "path" 键的 neo4j Path 对象（推荐形态，能拿到真实方向与关系类型）；
-          - 早期版本的 path_nodes / rels / path_len / relevance 扁平键（保留兼容）。
-        关系类型一律通过 _rel_to_dict 读取（内部使用驱动的 rel.type），
-        避免早期 `type(rel).__name__` 只得到 'Relationship' 的缺陷。
-        """
-        try:
-            if record.get("path") is not None:
-                neo_path = record["path"]
-                nodes = [self._node_to_dict(n) for n in neo_path.nodes]
-                rels = [self._rel_to_dict(r) for r in neo_path.relationships]
-                length = len(rels)
-                relevance = record.get("relevance")
-                # 查询里带了 relevance（例如全文/向量侧已经打过分的图路径）就直接沿用，
-                # 否则交回 _score_path 统一评分，保证同一批结果的分数量纲一致
-                if isinstance(relevance, (int, float)):
-                    return GraphPath(
-                        nodes=nodes,
-                        relationships=rels,
-                        path_length=length,
-                        relevance_score=float(relevance),
-                        path_type="multi_hop",
-                    )
-                built = self._build_graph_path(
-                    nodes=nodes, rels=rels, path_type="multi_hop",
-                    path_length=length if length else None,
-                )
-                if built is not None:
-                    built.relevance_score = self._score_path(built)
-                return built
-
-            # 兼容路径：扁平键形态
-            path_nodes = []
-            for node in (record.get("path_nodes") or []):
-                if isinstance(node, dict):
-                    path_nodes.append(node)
-                else:
-                    path_nodes.append(self._node_to_dict(node))
-
-            relationships = []
-            for rel in (record.get("rels") or []):
-                if isinstance(rel, dict):
-                    relationships.append(rel)
-                elif isinstance(rel, list):
-                    relationships.extend([self._rel_to_dict(item) for item in rel])
-                else:
-                    relationships.append(self._rel_to_dict(rel))
-
-            relevance = record.get("relevance")
-            return GraphPath(
-                nodes=path_nodes,
-                relationships=relationships,
-                path_length=int(record.get("path_len") or max(len(path_nodes) - 1, 1)),
-                relevance_score=float(relevance) if isinstance(relevance, (int, float)) else 0.0,
-                path_type="multi_hop"
-            )
-
-        except Exception as e:
-            logger.error(f"路径解析失败: {e}")
-            return None
+class DocumentFormattingMixin:
+    """结果表达：把路径/子图渲染为自然语言描述与 Document，并计算图结构分。"""
 
     def _paths_to_documents(self, paths: List[GraphPath], query: str) -> List[Document]:
         """将图路径转换为Document对象。
@@ -3985,6 +3890,10 @@ class GraphRAGRetrieval:
         tightness = min(density * 20.0, 1.0)
         return round(min(0.5 * coverage + 0.3 * linkage + 0.2 * tightness, 1.0), 6)
 
+
+class ResultRankingMixin:
+    """融合排序：词法重合度 + 图结构分 + 结果类型先验 + 可溯源程度的四分量排序。"""
+
     def _rank_by_graph_relevance(self, documents: List[Document], query: str) -> List[Document]:
         """基于图结构相关性排序（四分量融合排序）。
 
@@ -4058,16 +3967,152 @@ class GraphRAGRetrieval:
                      key=lambda x: x.metadata.get("relevance_score", 0.0),
                      reverse=True)
 
-    def close(self):
-        """关闭资源连接。
 
-        【为什么必须置空 driver】_is_driver_ready() 的判据就是 `driver is not None`，
-        而它自身的 docstring 声明的契约是"driver 非 None 等价于 initialize 时探测成功过"。
-        只 close 不置空时该契约被破坏：close() 之后 _is_driver_ready() 仍返回 True，
-        5 个查询点会继续走 Cypher 分支，逐条记 ERROR "Cypher 执行失败: Driver closed"，
-        关闭后的行为既不可观测又与"连接不可用"的降级语义不一致。
-        这里统一收口到 _discard_driver()，与 initialize() 失败路径口径完全一致（关闭 + 置空）。
+class GraphRAGRetrieval(
+    GraphStoreMixin,
+    GraphIndexMixin,
+    QueryUnderstandingMixin,
+    PathModelMixin,
+    GraphTraversalMixin,
+    PathQueryMixin,
+    SubgraphExtractionMixin,
+    GraphReasoningMixin,
+    DocumentFormattingMixin,
+    ResultRankingMixin,
+):
+    """真正的图RAG检索系统（门面）。
+
+    对外接口与拆分前完全一致：initialize / graph_rag_search / understand_graph_query /
+    multi_hop_traversal / extract_knowledge_subgraph / graph_structure_reasoning /
+    adaptive_query_planning / close，以及原有全部下划线辅助方法（测试与排障直接调用）。
+    内部按单一职责拆成十个能力组件；子类覆盖任一组件的方法即可替换实现，调用方无需修改。
+
+    核心特点：
+    1. 查询意图理解：识别图查询模式
+    2. 多跳图遍历：深度关系探索
+    3. 子图提取：相关知识网络
+    4. 图结构推理：基于拓扑的推理
+    5. 动态查询规划：自适应遍历策略
+    """
+
+    def __init__(self, config, llm_client):
+        self.config = config
+        self.llm_client = llm_client
+        self.driver = None
+
+        # 图结构缓存
+        self.entity_cache = {}
+        self.relation_cache = {}
+        self.subgraph_cache = {}
+
+        # 意图理解结果缓存：key = 原始查询串，value = GraphQuery。
+        # 同一个问题常被路由器与生成阶段反复问到，缓存可省掉重复的 LLM 调用。
+        self._query_understanding_cache: Dict[str, "GraphQuery"] = {}
+
+        # 实体名 -> nodeId 列表 的反向索引，由 _build_graph_index 预热，用于把自然语言里的实体名快速落到图谱节点上
+        self._name_index: Dict[str, List[str]] = defaultdict(list)
+
+        # 【属性值词表】菜系（Recipe.cuisineType）、分类（category）这类【只作为属性存在】的值。
+        # 它们在图谱里没有同名节点（实测「川菜」不存在同名节点，只存在于 33 个 Recipe 的 cuisineType），
+        # 因此不在 _name_index 里；但 _resolve_seed_nodes 的属性分支【能】匹配到它们。
+        # 单独一张表而不是混进 _name_index：后者的契约是"名称 -> nodeId"，混入属性值会污染别名定位。
+        self._vocab_phrases: Set[str] = set()
+
+        # 子图缓存的插入顺序，用于容量超限时做 FIFO 淘汰（无需引入额外依赖）
+        self._subgraph_cache_order: deque = deque()
+
+        # 最近一次多跳扩展【实际使用】的深度（由 _expand_multi_hop_paths 回填）。
+        # 请求深度与实际深度可能不同（种子度数会让深度降级），而"兜底查询是否与主路径等价"
+        # 必须按实际深度判断，否则会原样重跑一遍刚跑过的查询。
+        self._last_effective_depth: Optional[int] = None
+
+    def graph_rag_search(self, query: str, top_k: int = 5) -> List[Document]:
         """
-        if hasattr(self, 'driver') and self.driver:
-            self._discard_driver()
-            logger.info("图RAG检索系统已关闭")
+        图RAG主搜索接口：整合所有图RAG能力
+        """
+        logger.info(f"开始图RAG检索: {query}")
+
+        # 【入口防御一：query 必须是字符串】
+        # understand_graph_query 内部会 query.strip()，而它是在下面的 try 之前调用的，
+        # int / list / dict / float 会抛 AttributeError 直接穿透公开入口（实测均复现）。
+        # 检索模块对上层应当是"降级不抛错"的语义，这里统一收口为字符串。
+        query = _coerce_query_text(query)
+
+        # 【入口防御二：top_k 必须钳制成整数】
+        # 此前零校验，直接 results[:top_k]：
+        #   - top_k=None  → 切片键退化为 None，完全不截断，返回底层全部结果（实测 60 条）；
+        #   - top_k 为负  → 按尾部截断，返回近全量（-1 → 59 条）；
+        #   - 字符串/浮点 → 切片抛 TypeError，被下面的兜底 except 吞成 return []，
+        #     把"参数类型错误"伪装成"图里没数据"，调用方无法区分。
+        # 非整数输入记一条 warning 后回退到默认值，越界值钳到 [1, ...) ——
+        # top_k<=0 对检索 API 没有意义，返回 0 条只会让调用方以为"图里没有证据"。
+        try:
+            top_k = int(top_k)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(f"top_k 非法（{top_k!r}），回退为默认值 5")
+            top_k = 5
+        if top_k < 1:
+            logger.warning(f"top_k={top_k} 无意义（<=0），钳制为 1")
+            top_k = 1
+
+        if not self._is_driver_ready():
+            logger.warning("Neo4j连接未建立，返回空结果")
+            return []
+
+        # 1. 查询意图理解
+        graph_query = self.understand_graph_query(query)
+        logger.info(f"查询类型: {graph_query.query_type.value}")
+
+        results = []
+
+        try:
+            # 2. 根据查询类型执行不同策略
+            if graph_query.query_type in [QueryType.MULTI_HOP, QueryType.PATH_FINDING]:
+                # 多跳遍历
+                paths = self.multi_hop_traversal(graph_query)
+                results.extend(self._paths_to_documents(paths, query))
+
+            elif graph_query.query_type == QueryType.SUBGRAPH:
+                # 子图提取
+                subgraph = self.extract_knowledge_subgraph(graph_query)
+
+                # 图结构推理
+                reasoning_chains = self.graph_structure_reasoning(subgraph, query)
+
+                results.extend(self._subgraph_to_documents(subgraph, reasoning_chains, query))
+
+            elif graph_query.query_type == QueryType.ENTITY_RELATION:
+                # 实体关系查询
+                paths = self.multi_hop_traversal(graph_query)
+                results.extend(self._paths_to_documents(paths, query))
+
+            elif graph_query.query_type == QueryType.CLUSTERING:
+                # 聚类相似查询：走相似实体检索，产出"以相似项为成员"的路径型证据
+                paths = self.multi_hop_traversal(graph_query)
+                results.extend(self._paths_to_documents(paths, query))
+
+            # 2.5 结果回收：若主策略没拿到证据，退一步用子图策略补一次，
+            #     避免「路径分支恰好为空」时对用户静默返回空结果
+            if not results:
+                logger.info("主策略未取得结果，回退到子图检索")
+                subgraph_query = GraphQuery(
+                    query_type=QueryType.SUBGRAPH,
+                    source_entities=graph_query.source_entities,
+                    target_entities=graph_query.target_entities,
+                    max_depth=min(graph_query.max_depth, _MAX_TRAVERSAL_DEPTH),
+                    max_nodes=graph_query.max_nodes,
+                )
+                subgraph = self.extract_knowledge_subgraph(subgraph_query)
+                if subgraph.central_nodes or subgraph.connected_nodes:
+                    reasoning_chains = self.graph_structure_reasoning(subgraph, query)
+                    results.extend(self._subgraph_to_documents(subgraph, reasoning_chains, query))
+
+            # 3. 图结构相关性排序
+            results = self._rank_by_graph_relevance(results, query)
+
+            logger.info(f"图RAG检索完成，返回 {len(results[:top_k])} 个结果")
+            return results[:top_k]
+
+        except Exception as e:
+            logger.error(f"图RAG检索失败: {e}")
+            return []
