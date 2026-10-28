@@ -28,6 +28,8 @@ class SessionCacheManager:
         self.session_caches = {}  # 按session_id分组的缓存：{session_id: {query: response}}
         self.session_embeddings = {}  # 按session_id分组的向量：{session_id: {query: embedding}}
         self.session_contexts = {}  # 按session_id分组的上下文：{session_id: [messages]}
+        # 结构化会话状态：改写/路由/缓存使用；不把 AI 答案拼进检索 query
+        self.session_states = {}
         
         # 缓存配置
         self.cache_threshold = 0.75  # 语义相似度阈值
@@ -51,6 +53,7 @@ class SessionCacheManager:
 
         session_cache = self.session_caches[session_id]
         session_embeddings = self.session_embeddings[session_id]
+        current_topic = str(self.session_states.get(session_id, {}).get("active_topic") or "")
 
         if not session_cache:
             return None
@@ -67,6 +70,11 @@ class SessionCacheManager:
         best_response = None
 
         for cached_query, cached_data in session_cache.items():
+            cached_topic = str(cached_data.get("topic_id") or "")
+            # 话题切换后，不命中旧话题的缓存
+            if current_topic and cached_topic and current_topic != cached_topic:
+                continue
+
             cached_embedding = session_embeddings.get(cached_query)
             if cached_embedding is not None:
                 similarity = self._calculate_similarity(query_embedding, cached_embedding)
@@ -104,10 +112,11 @@ class SessionCacheManager:
             # 计算查询向量
             query_embedding = self.embedding_model.embed_documents([query])[0]
 
-            # 添加到缓存
+            # 添加到缓存（带上话题键，话题切换后旧缓存失效）
             session_cache[query] = {
                 'response': response,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'topic_id': str(self.session_states.get(session_id, {}).get("active_topic") or ""),
             }
             session_embeddings[query] = query_embedding
 
@@ -145,36 +154,126 @@ class SessionCacheManager:
             logger.warning(f"添加上下文失败: {e}")
 
     def get_context_for_query(self, session_id: str, current_query: str) -> str:
-        """获取增强的查询上下文"""
+        """
+        兼容旧调用：返回“可用于检索的独立 query”，不再拼接 AI 答案。
+
+        真正的理解/改写由路由器的理解层完成；这里只做一个最小改写，
+        避免旧调用方继续把历史答案拼进检索向量。
+        """
         try:
-            if not session_id or session_id not in self.session_contexts:
-                return current_query
+            from .query_routing.domain import DOMAIN
 
-            context = self.session_contexts[session_id]
-            if not context:
-                return current_query
-
-            # 构建上下文增强的查询
-            context_parts = []
-            
-            # 添加最近的对话历史（最多3轮）
-            recent_context = context[-3:] if len(context) > 3 else context
-            
-            for item in recent_context:
-                context_parts.append(f"用户问: {item['query']}")
-                context_parts.append(f"AI答: {item['response'][:100]}...")  # 截取前100字符
-            
-            # 添加当前查询
-            context_parts.append(f"当前问题: {current_query}")
-            
-            enhanced_query = "\n".join(context_parts)
-            
-            logger.info(f"🔗 已为会话 {session_id} 构建上下文增强查询")
-            return enhanced_query
+            state = self.session_states.get(session_id, {})
+            active_recipe = str(state.get("active_recipe") or "")
+            if (
+                active_recipe
+                and active_recipe not in current_query
+                and any(term in current_query for term in DOMAIN.reference_terms)
+            ):
+                return f"{active_recipe} {current_query}"
+            return current_query
 
         except Exception as e:
             logger.warning(f"上下文获取失败: {e}")
             return current_query
+
+    # ------------------------------------------------------------------
+    # 结构化会话状态
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _default_state() -> Dict[str, Any]:
+        """一个会话的初始状态。"""
+        return {
+            "active_recipe": "",
+            "active_topic": "",
+            "constraints": {},
+            "last_route_key": "",
+            "last_intent": "",
+            "recent_user_queries": [],
+            "updated_at": "",
+        }
+
+    def get_state(self, session_id: str) -> Dict[str, Any]:
+        """读取会话状态；没有就返回空结构。"""
+        state = self.session_states.get(session_id)
+        if not state:
+            return self._default_state()
+        return {
+            **state,
+            "constraints": dict(state.get("constraints") or {}),
+            "recent_user_queries": list(state.get("recent_user_queries") or []),
+        }
+
+    def get_history_for_rewrite(self, session_id: str, max_turns: int = 2) -> str:
+        """只返回最近几轮用户原话 + 已知约束，供理解层做指代消解。"""
+        state = self.session_states.get(session_id, {})
+        if not state:
+            return ""
+
+        lines = [
+            f"用户: {query}"
+            for query in (state.get("recent_user_queries") or [])[-max_turns:]
+        ]
+        constraints = state.get("constraints") or {}
+        if constraints:
+            lines.append(f"已知约束: {constraints}")
+        return "\n".join(lines)
+
+    def update_state_after_turn(
+        self,
+        session_id: str,
+        query: str,
+        analysis,
+        response: str = "",
+    ) -> None:
+        """一轮问答结束后更新结构化状态；不把 AI 答案写进状态。"""
+        if not session_id:
+            return
+
+        state = self.session_states.setdefault(session_id, self._default_state())
+        understanding = getattr(analysis, "understanding", None) or {}
+        intents = understanding.get("intents") or []
+
+        recipe_names = []
+        for item in intents:
+            for entity in item.get("entities") or []:
+                if entity.get("type") == "recipe" and entity.get("name"):
+                    recipe_names.append(entity["name"])
+
+        topic_shift = bool(getattr(analysis, "topic_shift", False))
+        route_key = str(getattr(analysis, "route_key", "") or "")
+        topic_id = str(getattr(analysis, "topic_id", "") or "")
+
+        if route_key == "out_of_scope":
+            # 域外问题视为话题中断：清掉旧菜名，后续“它…”不能复用旧菜谱和缓存
+            state["active_recipe"] = ""
+            state["active_topic"] = "out_of_scope"
+        elif topic_shift:
+            # 切换话题时清掉旧菜名；如果新话题本身点了菜，就记新菜
+            state["active_recipe"] = recipe_names[0] if recipe_names else ""
+            state["active_topic"] = recipe_names[0] if recipe_names else ""
+        else:
+            if recipe_names:
+                state["active_recipe"] = recipe_names[0]
+            state["active_topic"] = topic_id or state.get("active_recipe") or route_key
+
+        slots = getattr(analysis, "slots", None) or {}
+        if isinstance(slots, dict):
+            from .query_routing.domain import DOMAIN
+
+            for key in DOMAIN.persisted_slots:
+                if slots.get(key) not in (None, "", []):
+                    state["constraints"][key] = slots[key]
+
+        recent = state.setdefault("recent_user_queries", [])
+        recent.append(query)
+        if len(recent) > 4:
+            del recent[:-4]
+
+        state["last_route_key"] = route_key
+        state["last_intent"] = str(getattr(analysis, "intent", "") or "")
+        state["updated_at"] = datetime.now().isoformat()
 
     def get_session_stats(self) -> Dict[str, Any]:
         """获取缓存统计信息"""
@@ -182,6 +281,7 @@ class SessionCacheManager:
             'total_sessions': len(self.session_caches),
             'total_cached_queries': sum(len(cache) for cache in self.session_caches.values()),
             'total_contexts': sum(len(context) for context in self.session_contexts.values()),
+            'total_states': len(self.session_states),
             'cache_threshold': self.cache_threshold,
             'max_session_cache_size': self.max_session_cache_size,
             'max_context_length': self.max_context_length
@@ -195,6 +295,8 @@ class SessionCacheManager:
             del self.session_embeddings[session_id]
         if session_id in self.session_contexts:
             del self.session_contexts[session_id]
+        if session_id in self.session_states:
+            del self.session_states[session_id]
         logger.info(f"🗑️ 已清除会话 {session_id} 的缓存")
 
     def clear_all_caches(self):
@@ -202,4 +304,5 @@ class SessionCacheManager:
         self.session_caches.clear()
         self.session_embeddings.clear()
         self.session_contexts.clear()
+        self.session_states.clear()
         logger.info("🗑️ 已清除所有会话缓存")

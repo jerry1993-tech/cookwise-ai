@@ -9,7 +9,6 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-.pytest_cache/
 .mypy_cache/
 
 # Node / Next.js
@@ -24,3 +23,13 @@ out/
 # Logs
 *.log
 logs/
+data/logs/
+
+# === 临时排除（评测/测试产物，暂不提交；要恢复提交就删掉本节）===
+.pytest_cache/
+scripts/eval/
+tests/e2e/
+tests/gold/
+requirements-test.txt
+.github/
+# === 临时排除结束 ===

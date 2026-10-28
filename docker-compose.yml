@@ -23,11 +23,12 @@ services:
       # LOAD CSV 使用 file:/// 路径，直接挂载到 Neo4j 的 import 目录
       - ./data/cypher:/var/lib/neo4j/import
     healthcheck:
+      # cypher-shell 启动 JVM 需要十几秒，插件加载更久；timeout 过短会让健康检查进程堆积
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p all-in-rag 'RETURN 1'"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 40s
+      interval: 30s
+      timeout: 30s
+      retries: 20
+      start_period: 600s
     restart: unless-stopped
 
   # Milvus 向量数据库依赖服务

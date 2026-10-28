@@ -33,6 +33,11 @@ _LAZY = {
     "SearchStrategy": ("intelligent_query_router", "SearchStrategy"),
     "QueryAnalysis": ("intelligent_query_router", "QueryAnalysis"),
     "IntelligentQueryRouter": ("intelligent_query_router", "IntelligentQueryRouter"),
+    # 查询路由包（理解/策略/执行/tips）
+    "QueryUnderstandingService": ("query_routing.understanding", "QueryUnderstandingService"),
+    "RoutePolicy": ("query_routing.policy", "RoutePolicy"),
+    "TipsKnowledgeBase": ("query_routing.tips_knowledge", "TipsKnowledgeBase"),
+    "EvidenceService": ("query_routing.evidence", "EvidenceService"),
     # 答案生成
     "GenerationIntegrationModule": ("generation_integration", "GenerationIntegrationModule"),
     # 会话、推荐与 Web 服务
