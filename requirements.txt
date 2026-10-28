@@ -31,6 +31,7 @@ openai>=1.86.0,<2.0.0
 
 # 文本处理
 tiktoken>=0.4.0
+jieba>=0.42.1
 
 # 环境配置
 python-dotenv>=1.0.0

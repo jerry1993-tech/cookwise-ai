@@ -33,6 +33,11 @@ class GraphRAGConfig:
     # 检索配置（LightRAG Round-robin策略）
     top_k: int = 5
 
+    # 父文档回填：RRF 融合后把前几条 chunk 换成整篇菜谱，给生成层更完整的上下文
+    enable_parent_doc_retrieval: bool = True
+    parent_doc_top_n: int = 3
+    parent_doc_max_chars: int = 4000  # 单篇父文档截断长度，避免上下文过长
+
     # 图数据处理配置
     chunk_size: int = 500
     chunk_overlap: int = 50
@@ -65,6 +70,9 @@ class GraphRAGConfig:
 
             'llm_model': self.llm_model,
             'top_k': self.top_k,
+            'enable_parent_doc_retrieval': self.enable_parent_doc_retrieval,
+            'parent_doc_top_n': self.parent_doc_top_n,
+            'parent_doc_max_chars': self.parent_doc_max_chars,
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
 

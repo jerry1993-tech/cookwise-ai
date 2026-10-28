@@ -269,8 +269,11 @@ class AdvancedGraphRAGSystem:
             # 2. 显示路由信息
             strategy_icons = {
                 "hybrid_traditional": "🔍",
-                "graph_rag": "🕸️", 
-                "combined": "🔄"
+                "graph_rag": "🕸️",
+                "combined": "🔄",
+                "tips_knowledge": "📚",
+                "rule_engine": "📏",
+                "no_retrieval": "💬",
             }
             strategy_icon = strategy_icons.get(analysis.recommended_strategy.value, "❓")
             print(f"{strategy_icon} 使用策略: {analysis.recommended_strategy.value}")
@@ -289,14 +292,31 @@ class AdvancedGraphRAGSystem:
                 if len(doc_info) > 3:
                     print(f"    等 {len(relevant_docs)} 个结果...")
             else:
-                return "抱歉，没有找到相关的烹饪信息。请尝试其他问题。"
-          
+                # 闲聊/域外/澄清/无数据：不再直接返回“没找到”
+                if analysis is None:
+                    return "抱歉，没有找到相关的烹饪信息。请尝试其他问题。", analysis
+                if analysis.response_type == "clarify":
+                    return analysis.clarify_question or "请再说明一下你的问题。", analysis
+                if not analysis.needs_retrieval:
+                    direct = getattr(self.generation_module, "generate_direct_answer", None)
+                    if direct is not None:
+                        return direct(analysis.standalone_query or question, analysis), analysis
+                if analysis.response_type == "no_data":
+                    result = self.generation_module.generate_adaptive_answer(
+                        analysis.standalone_query or question, [], analysis
+                    )
+                    return result, analysis
+                return "抱歉，没有找到相关的烹饪信息。请尝试其他问题。", analysis
+
             # 4. 生成回答
             print("🎯 智能生成回答...")
-          
+            answer_question = (analysis.standalone_query if analysis else "") or question
+
             if stream:
                 try:
-                    for chunk_text in self.generation_module.generate_adaptive_answer_stream(question, relevant_docs):
+                    for chunk_text in self.generation_module.generate_adaptive_answer_stream(
+                        answer_question, relevant_docs, analysis=analysis
+                    ):
                         print(chunk_text, end="", flush=True)
                     print("\n")
                     result = "流式输出完成"
@@ -304,9 +324,13 @@ class AdvancedGraphRAGSystem:
                     logger.error(f"流式输出过程中出现错误: {stream_error}")
                     print(f"\n⚠️ 流式输出中断，切换到标准模式...")
                     # 使用非流式作为后备
-                    result = self.generation_module.generate_adaptive_answer(question, relevant_docs)
+                    result = self.generation_module.generate_adaptive_answer(
+                        answer_question, relevant_docs, analysis
+                    )
             else:
-                result = self.generation_module.generate_adaptive_answer(question, relevant_docs)
+                result = self.generation_module.generate_adaptive_answer(
+                    answer_question, relevant_docs, analysis
+                )
           
             # 5. 性能统计
             end_time = time.time()
@@ -344,17 +368,19 @@ class AdvancedGraphRAGSystem:
                 print("❌ Flask应用初始化失败")
                 return
 
+            # canary 时用 WEB_PORT 在 8001 再起一个实例，Nginx 按比例分流
+            port = int(os.getenv("WEB_PORT", "8000"))
             print("🚀 启动Web服务...")
-            print(f"📊 健康检查: http://localhost:8000/health")
-            print(f"💬 聊天API: http://localhost:8000/api/chat")
-            print(f"🌊 流式聊天: http://localhost:8000/api/chat/stream")
-            print(f"🍽️ 菜谱推荐: http://localhost:8000/api/recipes/recommendations")
-            print(f"📖 菜谱详情: http://localhost:8000/api/recipes/<recipe_id>")
-            print(f"📈 统计信息: http://localhost:8000/api/stats")
+            print(f"📊 健康检查: http://localhost:{port}/health")
+            print(f"💬 聊天API: http://localhost:{port}/api/chat")
+            print(f"🌊 流式聊天: http://localhost:{port}/api/chat/stream")
+            print(f"🍽️ 菜谱推荐: http://localhost:{port}/api/recipes/recommendations")
+            print(f"📖 菜谱详情: http://localhost:{port}/api/recipes/<recipe_id>")
+            print(f"📈 统计信息: http://localhost:{port}/api/stats")
             print("=" * 50)
 
             # 启动Flask应用
-            app.run(host='0.0.0.0', port=8000, debug=False)
+            app.run(host='0.0.0.0', port=port, debug=False)
 
         except Exception as e:
             logger.error(f"Web服务启动失败: {e}")
