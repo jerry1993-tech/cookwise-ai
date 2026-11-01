@@ -31,6 +31,23 @@ services:
       start_period: 600s
     restart: unless-stopped
 
+  # Redis：会话状态、语义缓存、限流
+  redis:
+    image: redis:7-alpine
+    container_name: cookwise-ai-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    # 只绑定本机，方便宿主机上的后端直连；容器内通过 redis:6379 访问
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   # Milvus 向量数据库依赖服务
   milvus-etcd:
     image: quay.io/coreos/etcd:v3.5.5
@@ -149,8 +166,15 @@ services:
       # 统一API配置
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.deepseek.com}
+      # Redis：会话/缓存/限流；容器内必须连上，否则启动失败
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_REQUIRED=true
+      - SESSION_TTL_SECONDS=${SESSION_TTL_SECONDS:-86400}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
+      - CHAT_RATE_LIMIT_PER_MINUTE=${CHAT_RATE_LIMIT_PER_MINUTE:-30}
     ports:
-      - "8000:8000"
+      # 只给宿主机本地访问；外部流量统一走 Nginx，避免绕过限流/直连后端
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
       - ./rag_modules:/app/rag_modules
@@ -162,6 +186,8 @@ services:
       neo4j-init:
         condition: service_completed_successfully
       milvus-standalone:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -225,6 +251,7 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  redis_data:
 
 networks:
   default:

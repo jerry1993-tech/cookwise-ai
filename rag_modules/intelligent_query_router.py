@@ -13,7 +13,7 @@
 保留 ``recommended_strategy`` 等旧字段，避免 main.py / 测试 / 前端受影响。
 """
 
-import concurrent.futures
+import asyncio
 import logging
 import time
 from dataclasses import asdict, dataclass, field
@@ -326,17 +326,10 @@ class IntelligentQueryRouter:
         """并行执行子计划，合并去重，返回整体状态和每个子计划的证据状态。"""
         sub_plans = plan.sub_plans
         if len(sub_plans) == 1:
+            # 单子计划不需要并发，直接跑，省掉一次事件循环
             results = [self._execute_sub_plan(sub_plans[0])]
         else:
-            results: List[Tuple[List[Document], ValidationResult]] = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(sub_plans))) as executor:
-                futures = [executor.submit(self._execute_sub_plan, item) for item in sub_plans]
-                for future in futures:
-                    try:
-                        results.append(future.result())
-                    except Exception as exc:
-                        logger.warning("子计划执行失败: %s", exc)
-                        results.append(([], ValidationResult("missing", "子计划执行失败")))
+            results = asyncio.run(self._execute_plan_async(sub_plans))
 
         merged: List[Document] = []
         seen = set()
@@ -375,6 +368,23 @@ class IntelligentQueryRouter:
         if any(status == "partial" for status in statuses):
             return merged, "partial", details
         return merged, "complete", details
+
+    async def _execute_plan_async(
+        self, sub_plans: List[SubPlan]
+    ) -> List[Tuple[List[Document], ValidationResult]]:
+        """每个子计划内部是同步代码，用 to_thread 并行；gather 保持返回顺序。"""
+        # 和旧实现一样，最多同时跑 4 个子计划，避免多意图查询把线程数打爆
+        semaphore = asyncio.Semaphore(4)
+
+        async def run(sub_plan: SubPlan):
+            async with semaphore:
+                try:
+                    return await asyncio.to_thread(self._execute_sub_plan, sub_plan)
+                except Exception as exc:
+                    logger.warning("子计划执行失败: %s", exc)
+                    return [], ValidationResult("missing", "子计划执行失败")
+
+        return await asyncio.gather(*(run(item) for item in sub_plans))
 
     @staticmethod
     def _merge_documents(primary: List[Document], extra: List[Document]) -> List[Document]:

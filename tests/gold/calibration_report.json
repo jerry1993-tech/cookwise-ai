@@ -1,0 +1,181 @@
+{
+  "predictions": "/Users/a/PycharmProjects/VsCode_Projects/cookwise-ai/tests/gold/predictions.jsonl",
+  "train_ratio": 0.7,
+  "turns_train": 577,
+  "turns_test": 230,
+  "default": {
+    "thresholds": {
+      "default": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recipe_ingredients": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recipe_steps_time": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recipe_overview": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "ingredient_pairing": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "ingredient_property": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recommend_list": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recommend_scenario": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "nutrition_value": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "nutrition_benefit": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "food_safety": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "chitchat": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "out_of_scope": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      }
+    },
+    "train": {
+      "turns": 577,
+      "route_correct": 577,
+      "needs_correct": 577,
+      "expected_clarify": 36,
+      "predicted_clarify": 36,
+      "false_clarify": 0,
+      "missed_clarify": 0
+    },
+    "test": {
+      "turns": 230,
+      "route_correct": 230,
+      "needs_correct": 230,
+      "expected_clarify": 9,
+      "predicted_clarify": 9,
+      "false_clarify": 0,
+      "missed_clarify": 0
+    }
+  },
+  "calibrated": {
+    "thresholds": {
+      "default": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recipe_ingredients": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recipe_steps_time": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recipe_overview": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "ingredient_pairing": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "ingredient_property": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recommend_list": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "recommend_scenario": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "nutrition_value": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "nutrition_benefit": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "food_safety": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "chitchat": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      },
+      "out_of_scope": {
+        "min_execute": 0.5,
+        "retrieval_override": 0.7,
+        "no_retrieval": 0.8
+      }
+    },
+    "train": {
+      "turns": 577,
+      "route_correct": 577,
+      "needs_correct": 577,
+      "expected_clarify": 36,
+      "predicted_clarify": 36,
+      "false_clarify": 0,
+      "missed_clarify": 0
+    },
+    "test": {
+      "turns": 230,
+      "route_correct": 230,
+      "needs_correct": 230,
+      "expected_clarify": 9,
+      "predicted_clarify": 9,
+      "false_clarify": 0,
+      "missed_clarify": 0
+    }
+  },
+  "changes": []
+}

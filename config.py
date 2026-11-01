@@ -30,6 +30,13 @@ class GraphRAGConfig:
     temperature: float = 0.1
     max_tokens: int = 4096
 
+    # Redis：会话/语义缓存/限流。生产环境建议 REDIS_REQUIRED=true
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    redis_required: bool = os.getenv("REDIS_REQUIRED", "false").lower() in ("1", "true", "yes", "on")
+    session_ttl_seconds: int = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
+    rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+    chat_rate_limit_per_minute: int = int(os.getenv("CHAT_RATE_LIMIT_PER_MINUTE", "30"))
+
     # 检索配置（LightRAG Round-robin策略）
     top_k: int = 5
 
@@ -69,6 +76,11 @@ class GraphRAGConfig:
             'embedding_model': self.embedding_model,
 
             'llm_model': self.llm_model,
+            'redis_url': self.redis_url,
+            'redis_required': self.redis_required,
+            'session_ttl_seconds': self.session_ttl_seconds,
+            'rate_limit_per_minute': self.rate_limit_per_minute,
+            'chat_rate_limit_per_minute': self.chat_rate_limit_per_minute,
             'top_k': self.top_k,
             'enable_parent_doc_retrieval': self.enable_parent_doc_retrieval,
             'parent_doc_top_n': self.parent_doc_top_n,

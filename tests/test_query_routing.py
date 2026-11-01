@@ -19,6 +19,8 @@ import json
 import logging
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # 规则兜底会逐条打 warning；测试时只保留错误日志
 logging.getLogger("rag_modules.query_routing.understanding").setLevel(logging.ERROR)
 
+from fastapi.testclient import TestClient
 from langchain_core.documents import Document
 
 import rag_modules.query_routing.text_utils as text_utils
@@ -45,7 +48,7 @@ from rag_modules.query_routing.schemas import ContextInfo, EntityRef, IntentItem
 from rag_modules.query_routing.text_utils import fallback_keywords, segment_words
 from rag_modules.intelligent_query_router import IntelligentQueryRouter
 from rag_modules.session_cache_manager import SessionCacheManager
-from rag_modules.web_service_handler import WebServiceHandler
+from rag_modules.web_service_handler import create_app
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +572,38 @@ def test_session_state():
 # ---------------------------------------------------------------------------
 
 
+def test_multi_subplan_asyncio_keeps_order():
+    """多个子计划用 asyncio 并行执行，但合并结果仍按计划顺序。"""
+    router = object.__new__(IntelligentQueryRouter)
+
+    def fake_execute(sub_plan):
+        # 第 1 个慢、第 2 个快：完成顺序与输出顺序不同
+        time.sleep(0.05 if sub_plan.index == 0 else 0.01)
+        return (
+            [Document(page_content=f"doc-{sub_plan.index}")],
+            SimpleNamespace(status="complete", detail="", retry_hint=""),
+        )
+
+    router._execute_sub_plan = fake_execute
+    sub_plans = [
+        SubPlan(
+            intent=IntentItem(intent="recipe_detail", route_key="recipe_ingredients"),
+            query="宫保鸡丁需要哪些食材？", engine="hybrid", top_k=5,
+            need_complete=True, validator="ingredients", index=0,
+        ),
+        SubPlan(
+            intent=IntentItem(intent="recipe_detail", route_key="recipe_steps_time"),
+            query="要煮多久？", engine="hybrid", top_k=5,
+            need_complete=True, validator="steps", index=1,
+        ),
+    ]
+
+    documents, status, details = router._execute_plan(SimpleNamespace(sub_plans=sub_plans))
+    assert [doc.page_content for doc in documents] == ["doc-0", "doc-1"]
+    assert status == "complete"
+    assert [item["index"] for item in details] == [0, 1]
+
+
 def test_topic_id():
     context = ContextInfo(active_recipe="宫保鸡丁")
     base = Understanding(standalone_query="", needs_retrieval=True, intents=[], context=context)
@@ -831,12 +866,10 @@ class FakeRagSystem:
 
 def test_web_response_types():
     for mode, expected in (("chitchat", "闲聊回答"), ("clarify", "你想问哪道菜？"), ("answer", "证据回答")):
-        handler = WebServiceHandler(FakeRagSystem(mode))
-        app = handler.setup_flask_app()
-        client = app.test_client()
+        client = TestClient(create_app(FakeRagSystem(mode)))
         response = client.post("/api/chat", json={"message": "测试", "session_id": "s1"})
         assert response.status_code == 200
-        assert response.get_json()["response"] == expected, f"{mode} -> {response.get_json()}"
+        assert response.json()["response"] == expected, f"{mode} -> {response.json()}"
 
     print("PASS: Web 层 response_type 处理")
 
@@ -846,8 +879,7 @@ def test_feedback_endpoint(tmp_path, monkeypatch):
     feedback_path = tmp_path / "feedback.jsonl"
     monkeypatch.setenv("FEEDBACK_LOG_PATH", str(feedback_path))
 
-    handler = WebServiceHandler(FakeRagSystem("answer"))
-    client = handler.setup_flask_app().test_client()
+    client = TestClient(create_app(FakeRagSystem("answer")))
 
     response = client.post("/api/feedback", json={
         "session_id": "s1",
@@ -860,7 +892,7 @@ def test_feedback_endpoint(tmp_path, monkeypatch):
     invalid = client.post("/api/feedback", json={"query": "没有评分"})
     assert invalid.status_code == 400
 
-    stats = client.get("/api/feedback/stats").get_json()
+    stats = client.get("/api/feedback/stats").json()
     assert stats == {"like": 1, "dislike": 0, "correction": 0, "total": 1}
     assert feedback_path.exists()
 
@@ -941,14 +973,32 @@ def test_multi_intent_answer_numbering_is_code_owned():
     class FakeCompletions:
         def __init__(self):
             self.prompts = []
-            self.responses = [
-                "1. 宫保鸡丁需要哪些食材？\n- 鸡肉\n- 花生",
-                "1. 要煮多久？\n- 10 分钟",
-            ]
+            self.lock = threading.Lock()
+            self.simple = False
 
         def create(self, **kwargs):
-            self.prompts.append(kwargs["messages"][0]["content"])
-            content = self.responses[len(self.prompts) - 1]
+            prompt = kwargs["messages"][0]["content"]
+            with self.lock:
+                self.prompts.append(prompt)
+
+            # 并行生成时调用顺序不固定，按证据内容返回，避免测试依赖线程调度
+            if self.simple:
+                content = "食材" if "食材证据" in prompt else "时间"
+            elif "食材证据" in prompt:
+                content = "1. 宫保鸡丁需要哪些食材？\n- 鸡肉\n- 花生"
+            else:
+                content = "1. 要煮多久？\n- 10 分钟"
+
+            # 第 1 节走真实流式，返回分块；第 2 节走非流式，返回整段
+            if kwargs.get("stream"):
+                # 故意先吐两个空行，验证标题缓冲不会被空行骗过去
+                content = "\n\n" + content
+                pieces = [content[i:i + 6] for i in range(0, len(content), 6)]
+                return [
+                    SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=piece))])
+                    for piece in pieces
+                ]
+
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
             )
@@ -980,8 +1030,8 @@ def test_multi_intent_answer_numbering_is_code_owned():
     )
 
     assert len(completions.prompts) == 2
-    assert "食材证据" in completions.prompts[0] and "时间证据" not in completions.prompts[0]
-    assert "时间证据" in completions.prompts[1] and "食材证据" not in completions.prompts[1]
+    assert any("食材证据" in p and "时间证据" not in p for p in completions.prompts)
+    assert any("时间证据" in p and "食材证据" not in p for p in completions.prompts)
     # 节标题必须是 markdown 标题块；裸 `1. …` 会被渲染成列表项并与正文有序列表合并
     assert answer.startswith("### 1. 宫保鸡丁需要哪些食材？\n")
     assert "\n### 2. 要煮多久？\n" in answer
@@ -992,13 +1042,140 @@ def test_multi_intent_answer_numbering_is_code_owned():
     assert answer.count("要煮多久？") == 1
     assert "1. 要煮多久？" not in answer
 
-    completions.responses = ["食材", "时间"]
+    completions.simple = True
     completions.prompts.clear()
     text = module.generate_adaptive_answer("宫保鸡丁需要哪些食材？要煮多久？", documents, analysis=analysis)
     assert text.startswith("### 1. 宫保鸡丁需要哪些食材？\n\n食材")
     assert "\n\n### 2. 要煮多久？\n\n时间" in text
 
     print("PASS: 多意图回答编号由代码生成")
+
+
+def test_multi_intent_sections_run_in_parallel_and_keep_order():
+    """两节生成必须同时开跑，但输出顺序仍按子问题 1/2。"""
+    from rag_modules.generation_integration import GenerationIntegrationModule
+
+    class FakeCompletions:
+        def __init__(self):
+            self.prompts = []
+            self.lock = threading.Lock()
+            self.both_started = False
+            self.barrier = threading.Barrier(2, timeout=2)
+
+        def create(self, **kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            with self.lock:
+                self.prompts.append(prompt)
+            try:
+                # 两节都进到这里，才说明确实是并行生成；串行时第一个会超时
+                self.barrier.wait()
+                self.both_started = True
+            except threading.BrokenBarrierError:
+                pass
+
+            # 第 1 节故意慢一点，验证“完成顺序”不影响“输出顺序”
+            if "食材证据" in prompt:
+                time.sleep(0.15)
+                content = "食材"
+            else:
+                content = "时间"
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    module = object.__new__(GenerationIntegrationModule)
+    completions = FakeCompletions()
+    module.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    module.model_name = "fake"
+    module.temperature = 0.1
+    module.max_tokens = 512
+
+    analysis = SimpleNamespace(
+        route_key="recipe_ingredients",
+        is_multi_intent=True,
+        sub_queries=[
+            {"index": 0, "route_key": "recipe_ingredients", "query": "宫保鸡丁需要哪些食材？"},
+            {"index": 1, "route_key": "recipe_steps_time", "query": "要煮多久？"},
+        ],
+        slots={},
+        disclaimer_required=False,
+    )
+    documents = [
+        Document(page_content="食材证据", metadata={"sub_query_index": 0}),
+        Document(page_content="时间证据", metadata={"sub_query_index": 1}),
+    ]
+
+    text = module.generate_adaptive_answer("宫保鸡丁需要哪些食材？要煮多久？", documents, analysis=analysis)
+    assert completions.both_started is True, "两节没有并行执行"
+    assert text.startswith("### 1. 宫保鸡丁需要哪些食材？\n\n食材")
+    assert "\n\n### 2. 要煮多久？\n\n时间" in text
+
+    print("PASS: 多意图并行生成且按序输出")
+
+
+def test_howto_first_section_keeps_step_repair():
+    """多意图第 1 节是“怎么做”时，不能为了流式跳过步骤结构修复。"""
+    from rag_modules.generation_integration import GenerationIntegrationModule
+
+    class FakeCompletions:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.stream_flags = []
+
+        def create(self, **kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            with self.lock:
+                self.stream_flags.append(bool(kwargs.get("stream")))
+            # 第 1 节故意输出流水账，触发 _ensure_step_structure
+            content = "先把鱼片解冻，再切片，最后盛盘。" if "步骤证据" in prompt else "食材"
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    module = object.__new__(GenerationIntegrationModule)
+    completions = FakeCompletions()
+    module.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    module.model_name = "fake"
+    module.temperature = 0.1
+    module.max_tokens = 512
+
+    analysis = SimpleNamespace(
+        route_key="recipe_steps_time",
+        is_multi_intent=True,
+        sub_queries=[
+            {"index": 0, "route_key": "recipe_steps_time", "query": "水煮鱼怎么做？"},
+            {"index": 1, "route_key": "recipe_ingredients", "query": "需要哪些食材？"},
+        ],
+        slots={},
+        disclaimer_required=False,
+    )
+    steps_doc = Document(
+        page_content="\n".join([
+            "【菜谱】水煮鱼",
+            "【图谱步骤（共 3 步）】",
+            "1. 步骤1",
+            "   描述：解冻鱼片。",
+            "2. 步骤2",
+            "   描述：切片。",
+            "3. 步骤3",
+            "   描述：盛盘。",
+        ]),
+        metadata={"sub_query_index": 0, "evidence_type": "steps"},
+    )
+    documents = [
+        steps_doc,
+        Document(page_content="食材证据", metadata={"sub_query_index": 1}),
+    ]
+
+    answer = "".join(
+        module.generate_adaptive_answer_stream("水煮鱼怎么做？需要哪些食材？", documents, analysis=analysis)
+    )
+    assert all(flag is False for flag in completions.stream_flags), "howto 首节不应走流式"
+    assert "1. 解冻鱼片。" in answer
+    assert "2. 切片。" in answer
+    assert "3. 盛盘。" in answer
+
+    print("PASS: howto 首节仍做步骤修复")
 
 
 def test_steps_answer_structure_is_repaired():
@@ -1044,11 +1221,9 @@ def test_steps_answer_structure_is_repaired():
 
 
 def test_web_stream():
-    handler = WebServiceHandler(FakeRagSystem("chitchat"))
-    app = handler.setup_flask_app()
-    client = app.test_client()
+    client = TestClient(create_app(FakeRagSystem("chitchat")))
     response = client.post("/api/chat_stream", json={"message": "测试", "session_id": "s2"})
-    body = response.get_data(as_text=True)
+    body = response.text
     assert response.status_code == 200
     assert "闲聊回答" in body
     assert "[DONE]" in body
@@ -1071,6 +1246,7 @@ if __name__ == "__main__":
     test_same_route_multi_recipe()
     test_multi_turn_constraint()
     test_session_state()
+    test_multi_subplan_asyncio_keeps_order()
     test_topic_id()
     test_top_intent_fallback()
     test_validator()
@@ -1079,5 +1255,7 @@ if __name__ == "__main__":
     test_web_response_types()
     test_generation_thinking_disabled()
     test_multi_intent_generation_prompt()
+    test_multi_intent_sections_run_in_parallel_and_keep_order()
+    test_howto_first_section_keeps_step_repair()
     test_web_stream()
     print("\n全部查询路由测试通过")

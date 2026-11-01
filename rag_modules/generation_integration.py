@@ -8,6 +8,7 @@
 旧调用方式（question, documents）保持不变。
 """
 
+import concurrent.futures
 import copy
 import logging
 import os
@@ -33,6 +34,9 @@ _HOWTO_HINTS = (
     "做法", "制作方法", "制作步骤", "步骤", "流程",
 )
 _STEP_FORMAT_RULE = "制作过程每一步单独一行并用 1./2. 编号，禁止把多个步骤合并成一段。"
+
+# 多意图每节一次 LLM 调用；最多同时跑 4 节，避免一个请求把线程数打爆
+_MAX_SECTION_WORKERS = 4
 
 
 def _is_howto(question: str) -> bool:
@@ -172,6 +176,128 @@ class GenerationIntegrationModule:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # 多意图分节：有界并行，按序输出
+    # ------------------------------------------------------------------
+
+    def _section_tasks(self, sections):
+        """把每一节提交到有界线程池，返回 (executor, [(order, question, future)])。"""
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(_MAX_SECTION_WORKERS, len(sections)),
+            thread_name_prefix="section-gen",
+        )
+        tasks = []
+        for order, sub_question, section_documents, sub_analysis in sections:
+            future = executor.submit(
+                self.generate_adaptive_answer, sub_question, section_documents, sub_analysis
+            )
+            tasks.append((order, sub_question, future))
+        return executor, tasks
+
+    @staticmethod
+    def _section_result(future, sub_question: str) -> str:
+        """取单节结果；单节失败只影响这一节，不拖垮整篇回答。"""
+        try:
+            return future.result()
+        except Exception as exc:
+            logger.error("子问题生成失败（%s）: %s", sub_question, exc)
+            return "抱歉，这个子问题生成失败，请稍后重试。"
+
+    def _generate_multi_intent(self, sections) -> str:
+        """非流式：所有节并行生成，按原顺序拼回去。"""
+        executor, tasks = self._section_tasks(sections)
+        try:
+            parts = []
+            for order, sub_question, future in tasks:
+                content = self._section_result(future, sub_question)
+                content = self._strip_section_heading(content, sub_question)
+                parts.append(f"### {order}. {sub_question}\n\n{content}".strip())
+            return "\n\n".join(parts)
+        finally:
+            executor.shutdown(wait=True)
+
+    def _stream_one_section(self, question: str, documents: List[Document], analysis):
+        """流式生成一节；先缓冲到第一行结束，去掉模型复述的标题再往外吐。"""
+        buffer = ""
+        emitted = False
+
+        def first_line_ready(text: str) -> str:
+            # 模型有时先吐几个空行；跳过它们，否则会把空行当成“第一行”而漏掉标题
+            return re.sub(r"^(?:[ \t]*\r?\n)+", "", text)
+
+        for chunk in self.generate_adaptive_answer_stream(question, documents, analysis=analysis):
+            if emitted:
+                yield chunk
+                continue
+            buffer += chunk
+            ready = first_line_ready(buffer)
+            if "\n" not in ready:
+                continue
+            cleaned = self._strip_section_heading(ready, question)
+            emitted = True
+            if cleaned:
+                yield cleaned
+        if not emitted:
+            yield self._strip_section_heading(first_line_ready(buffer), question)
+
+    def _stream_sections_in_order(self, sections):
+        """所有节并行非流式生成，按顺序输出；给需要步骤修复的 howto 首节用。"""
+        executor, tasks = self._section_tasks(sections)
+        try:
+            for order, sub_question, future in tasks:
+                yield f"### {order}. {sub_question}\n\n"
+                content = self._section_result(future, sub_question)
+                yield self._strip_section_heading(content, sub_question)
+                yield "\n\n"
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _stream_multi_intent(self, sections):
+        """流式：第 1 节边生成边吐；其余节并行生成，轮到哪节再按序输出。"""
+        first_order, first_question, first_documents, first_analysis = sections[0]
+
+        # “怎么做”且证据里有 >=3 步时，首节必须走非流式，才能跑 _ensure_step_structure
+        if _is_howto(first_question) and len(self._evidence_steps(first_documents)) >= 3:
+            yield from self._stream_sections_in_order(sections)
+            return
+
+        rest = sections[1:]
+
+        executor = None
+        tasks = []
+        if rest:
+            # 第 1 节已经在当前线程里生成，线程池最多再补 3 节，总数仍不超过 4
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(max(1, _MAX_SECTION_WORKERS - 1), len(rest)),
+                thread_name_prefix="section-gen",
+            )
+            for order, sub_question, section_documents, sub_analysis in rest:
+                tasks.append((
+                    order,
+                    sub_question,
+                    executor.submit(
+                        self.generate_adaptive_answer,
+                        sub_question,
+                        section_documents,
+                        sub_analysis,
+                    ),
+                ))
+
+        try:
+            yield f"### {first_order}. {first_question}\n\n"
+            yield from self._stream_one_section(first_question, first_documents, first_analysis)
+            yield "\n\n"
+
+            for order, sub_question, future in tasks:
+                yield f"### {order}. {sub_question}\n\n"
+                content = self._section_result(future, sub_question)
+                yield self._strip_section_heading(content, sub_question)
+                yield "\n\n"
+        finally:
+            # 客户端断开时取消还没开始的任务；已经在跑的 LLM 调用无法强行取消
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    # ------------------------------------------------------------------
     # 有证据的回答
     # ------------------------------------------------------------------
 
@@ -179,12 +305,7 @@ class GenerationIntegrationModule:
         """基于证据生成答案；证据为空时明确说“没有检索到”。"""
         sections = self._multi_intent_sections(analysis, documents)
         if sections is not None:
-            parts = []
-            for order, sub_question, section_documents, sub_analysis in sections:
-                content = self.generate_adaptive_answer(sub_question, section_documents, sub_analysis)
-                content = self._strip_section_heading(content, sub_question)
-                parts.append(f"### {order}. {sub_question}\n\n{content}".strip())
-            return "\n\n".join(parts)
+            return self._generate_multi_intent(sections)
 
         if not documents:
             prompt = build_no_evidence_prompt(question)
@@ -221,11 +342,7 @@ class GenerationIntegrationModule:
         """
         sections = self._multi_intent_sections(analysis, documents)
         if sections is not None:
-            for order, sub_question, section_documents, sub_analysis in sections:
-                yield f"### {order}. {sub_question}\n\n"
-                content = self.generate_adaptive_answer(sub_question, section_documents, sub_analysis)
-                yield self._strip_section_heading(content, sub_question)
-                yield "\n\n"
+            yield from self._stream_multi_intent(sections)
             return
 
         if not documents:
@@ -234,6 +351,7 @@ class GenerationIntegrationModule:
             context = self._format_context(documents, analysis)
             prompt = self._build_prompt(question, context, analysis)
 
+        started = False  # 已经吐给前端的内容不能撤回，重试会变成重复正文
         for attempt in range(max_retries):
             try:
                 response = self._create_completion(
@@ -252,10 +370,17 @@ class GenerationIntegrationModule:
 
                 for chunk in response:
                     if chunk.choices[0].delta.content:
+                        started = True
                         yield chunk.choices[0].delta.content
                 return
 
             except Exception as e:
+                if started:
+                    # 已经输出了一部分，再重试会把同样的开头重复一遍
+                    logger.error("流式生成中途中断，不再重试: %s", e)
+                    yield "\n\n（生成中断，请重试）"
+                    return
+
                 logger.warning(f"流式生成第{attempt + 1}次尝试失败: {e}")
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 2

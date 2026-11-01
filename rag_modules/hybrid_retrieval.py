@@ -13,7 +13,7 @@
     parent_documents.py     父文档回填
 """
 
-import concurrent.futures
+import asyncio
 import logging
 from typing import Dict, List, Tuple
 
@@ -39,13 +39,12 @@ logger = logging.getLogger(__name__)
 __all__ = ["HybridRetrievalModule", "RetrievalResult"]
 
 
-def _read_future(future: concurrent.futures.Future, default):
-    """读取并行任务的结果；任务抛异常时返回 default，不连累其它链路。"""
-    try:
-        return future.result() or default
-    except Exception as e:
-        logger.error(f"检索任务失败: {e}")
+def _value_or_default(result, default):
+    """读取 gather 结果；某一路上抛异常时返回 default，不连累其它路。"""
+    if isinstance(result, BaseException):
+        logger.error(f"检索任务失败: {result}")
         return default
+    return result or default
 
 
 class HybridRetrievalModule:
@@ -162,25 +161,35 @@ class HybridRetrievalModule:
         )
 
     def hybrid_search(self, query: str, top_k: int = 5) -> List[Document]:
+        """同步入口：保留原签名，内部交给 asyncio 并行召回。
+
+        当前调用方是同步 Web 层（FastAPI 线程池）；如果以后在 async 环境里复用，
+        直接 await ``hybrid_search_async``，不要在已有事件循环里调用本方法。
+        """
+        return asyncio.run(self.hybrid_search_async(query, top_k))
+
+    async def hybrid_search_async(self, query: str, top_k: int = 5) -> List[Document]:
         """
         混合检索：三路召回（图键值双层 + 向量 + BM25）→ RRF 融合
 
-        三路互不依赖，这里用线程池并行执行；融合结果与串行完全一致。
+        三路互不依赖，用 asyncio.gather 并行；融合顺序与串行完全一致。
         """
         logger.info(f"开始混合检索（dual + vector + bm25, RRF k={RRF_K}）: {query}")
 
         # 每路给 RRF 留够候选空间，否则三路各自前 top_k 容易没交集，融合退化
         candidate_k = max(top_k * 2, 10)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            future_dual = executor.submit(self.dual_level_retrieval, query, candidate_k)
-            future_vector = executor.submit(self.vector_search_enhanced, query, candidate_k)
-            future_bm25 = executor.submit(self.bm25_search, query, candidate_k)
-        # with 退出时三路都已跑完，这里只负责取结果
+        # to_thread 把同步的 Neo4j / Milvus / BM25 调用丢到线程里，事件循环负责等
+        results = await asyncio.gather(
+            asyncio.to_thread(self.dual_level_retrieval, query, candidate_k),
+            asyncio.to_thread(self.vector_search_enhanced, query, candidate_k),
+            asyncio.to_thread(self.bm25_search, query, candidate_k),
+            return_exceptions=True,
+        )
 
-        dual_docs = _read_future(future_dual, [])
-        vector_docs = _read_future(future_vector, [])
-        bm25_docs = _read_future(future_bm25, [])
+        dual_docs = _value_or_default(results[0], [])
+        vector_docs = _value_or_default(results[1], [])
+        bm25_docs = _value_or_default(results[2], [])
 
         # 标记每路来源（dual_level 内部会写 search_type 但不一定写 search_method）
         for d in dual_docs:
