@@ -1,19 +1,167 @@
-# cookwise-ai
+<div align="center">
+  <h1>CookWise AI</h1>
+  <p><sub>KNOWLEDGE GRAPH&nbsp;·&nbsp;HYBRID RETRIEVAL&nbsp;·&nbsp;QUERY ROUTING&nbsp;·&nbsp;MULTI-TURN COOKING ASSISTANT</sub></p>
+  <p>
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11"></a>
+    <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI"></a>
+    <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/Neo4j-5.11-4581C3?style=flat-square&amp;logo=neo4j&amp;logoColor=white" alt="Neo4j 5.11"></a>
+    <a href="https://milvus.io/"><img src="https://img.shields.io/badge/Milvus-2.3.2-00A1EA?style=flat-square&amp;logo=milvus&amp;logoColor=white" alt="Milvus 2.3.2"></a>
+    <a href="https://nextjs.org/"><img src="https://img.shields.io/badge/Next.js-14-000000?style=flat-square&amp;logo=nextdotjs&amp;logoColor=white" alt="Next.js 14"></a>
+  </p>
+  <p><b>English</b>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="README_zh.md">简体中文</a></p>
+</div>
 
+## 1. Background & Goals
+
+### 1.1 From Traditional RAG to Graph RAG
+
+Traditional RAG relies on vector retrieval and parent-child chunking. It answers simple recipe queries, but falls short in a relation-heavy, constraint-rich cooking domain:
+
+- **Missing relational semantics**: it cannot explicitly model relationships among recipes, ingredients, steps, and cooking methods.
+- **Weak cross-document linkage**: it struggles to surface implicit links such as similarity or substitution between recipes.
+- **Limited reasoning**: without multi-hop reasoning over a knowledge graph, compositional questions are hard to answer.
+
+### 1.2 Core Advantages of the RAG System
+
+Built around a Neo4j knowledge graph and augmented with vector retrieval, BM25, and query routing, CookWise AI is a production-oriented cooking assistant:
+
+- **Structured knowledge**: the graph encodes entities and relations while preserving the original recipe text.
+- **Hybrid retrieval**: graph retrieval, Milvus vector search, and BM25 run in parallel and fuse via RRF.
+- **Query routing**: intent-aware evidence engines with multi-intent decomposition and parallel retrieval.
+- **Controlled answers**: confidence gates, evidence validation, and fallbacks; the system states clearly when evidence is insufficient.
+- **Production readiness**: multi-turn sessions, streaming, semantic cache, Redis rate limiting, and feedback logs.
+
+## 2. Environment Setup
+
+> Run all commands from the repository root; replace `localhost` with your server IP for remote deployment.
+
+### 2.1 Create a Virtual Environment
+
+```bash
+conda create -n cookwise-ai python=3.11
+conda activate cookwise-ai
+```
+
+### 2.2 Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+> For offline unit tests only, install `requirements-test.txt`; torch, Neo4j, and Milvus are not required.
+
+### 2.3 Neo4j Configuration
+
+Neo4j is managed by [`docker-compose.yml`](docker-compose.yml) with image `neo4j:5.11-community`; APOC and GDS are enabled.
+
+#### 2.3.1 Start Neo4j
+
+```bash
+docker compose up -d neo4j
+docker compose ps
+```
+
+#### 2.3.2 Open Neo4j Browser
+
+- **Web UI**: http://localhost:7474
+- **Username**: neo4j
+- **Password**: all-in-rag
+
+#### 2.3.3 Import Data
+
+`data/cypher` is mounted at `/var/lib/neo4j/import`. `neo4j-init` imports automatically when the database is empty:
+
+```bash
+docker compose up neo4j-init
+```
+
+It loads recipe, ingredient, and step nodes plus their relationships from `data/cypher/nodes.csv` and `relationships.csv`; it skips when the database is non-empty.
+
+To re-import manually (the script MERGEs by `nodeId`, so it is repeatable):
+
+```bash
+docker exec -it cookwise-ai-neo4j cypher-shell -u neo4j -p all-in-rag \
+  -f /var/lib/neo4j/import/neo4j_import.cypher
+```
+
+### 2.4 Milvus Configuration
+
+Milvus Standalone and its etcd and MinIO dependencies are also defined in `docker-compose.yml`.
+
+#### 2.4.1 Start Milvus
+
+```bash
+docker compose up -d milvus-etcd milvus-minio milvus-standalone
+docker compose ps
+```
+
+#### 2.4.2 Build the Vector Index
+
+On first startup, if collection `cooking_knowledge` does not exist, the backend builds it with BGE-small-zh-v1.5. To force a rebuild:
+
+```bash
+python scripts/rebuild_index.py
+```
+
+#### 2.4.3 Verify the Installation
+
+```bash
+docker compose ps                 # milvus-standalone should be healthy
+curl -s localhost:9091/healthz    # returns OK
+```
+
+Milvus listens on `19530`; the MinIO console is at http://localhost:9001 (`minioadmin / minioadmin`).
+
+### 2.5 Connection Settings
+
+Copy the example file and fill in the required values:
+
+```bash
+cp .env.example .env
+```
+
+### 2.6 Start the Service
+
+```bash
+# Local backend (Neo4j / Milvus / Redis must be running first)
+python main.py
+```
+
+Or launch the full container stack (backend, frontend, Nginx):
+
+```bash
+docker compose up -d --build
+```
+
+### 🌐 Access
+
+Once startup completes, open:
+
+- **🏠 Home**: http://localhost
+- **⚛️ Frontend**: http://localhost:3000
+- **🐍 Backend API**: http://localhost:8000
+- **📊 Neo4j**: http://localhost:7474 (neo4j/all-in-rag)
+- **🗄️ MinIO (Milvus storage)**: http://localhost:9001 (minioadmin/minioadmin)
+
+## 3. System Architecture
+
+### 3.1 Overall Architecture
+
+The RAG system is modular and consists of the following core components:
 
 ```mermaid
 flowchart TD
 
-    %% ==================== 启动与知识库 ====================
-    subgraph BOOT["启动与知识库准备"]
-        START["main.py 启动"] --> CONFIG["加载 GraphRAGConfig<br/>Neo4j / Milvus / LLM / Redis"]
-        CONFIG --> DEP_CHECK{"依赖检查"}
-        DEP_CHECK -->|失败| BOOT_FAIL["启动失败<br/>输出具体依赖检查项"]
-        DEP_CHECK -->|通过| INIT["按依赖顺序初始化 8 个步骤"]
+    %% ==================== Startup & Knowledge Base ====================
+    subgraph BOOT["Startup & Knowledge Base"]
+        START["main.py starts"] --> CONFIG["Load GraphRAGConfig<br/>Neo4j / Milvus / LLM / Redis"]
+        CONFIG --> DEP_CHECK{"Dependency check"}
+        DEP_CHECK -->|failed| BOOT_FAIL["Startup failed<br/>report the missing dependency"]
+        DEP_CHECK -->|passed| INIT["Initialize 8 steps in dependency order"]
 
-        INIT --> DATA["GraphDataPreparation<br/>Neo4j 图数据 → 菜谱文档 → chunks"]
-        INIT --> INDEX["MilvusIndexConstruction<br/>BGE-small-zh-v1.5 / 512 维"]
-        INIT --> GEN_MOD["GenerationIntegration<br/>OpenAI 兼容 LLM 客户端"]
+        INIT --> DATA["GraphDataPreparation<br/>Neo4j graph → recipe docs → chunks"]
+        INIT --> INDEX["MilvusIndexConstruction<br/>BGE-small-zh-v1.5 / 512-dim"]
+        INIT --> GEN_MOD["GenerationIntegration<br/>OpenAI-compatible LLM client"]
         INIT --> HYBRID["HybridRetrievalModule"]
         INIT --> GRAPH["GraphRAGRetrieval"]
         INIT --> ROUTER["IntelligentQueryRouter"]
@@ -21,33 +169,33 @@ flowchart TD
         INIT --> LIMITER["RedisRateLimiter"]
         INIT --> RECIPE["RecipeRecommendationManager"]
 
-        INDEX --> KB_CHECK{"Milvus 集合已存在？"}
-        KB_CHECK -->|是| LOAD_KB["加载已有向量集合"]
-        KB_CHECK -->|否| BUILD_DATA["Neo4j → 菜谱文档 / chunks"]
-        LOAD_KB --> LOAD_DATA["加载图数据<br/>构建菜谱文档 / chunks"]
-        LOAD_KB -.->|加载失败则重建| BUILD_DATA
-        BUILD_DATA --> BUILD_VEC["新建集合并构建向量索引"]
-        LOAD_DATA --> READY["初始化 BM25 / 图索引 / 检索引擎"]
+        INDEX --> KB_CHECK{"Milvus collection exists?"}
+        KB_CHECK -->|yes| LOAD_KB["Load the existing collection"]
+        KB_CHECK -->|no| BUILD_DATA["Neo4j → recipe docs / chunks"]
+        LOAD_KB --> LOAD_DATA["Load graph data<br/>build recipe docs / chunks"]
+        LOAD_KB -.->|load failed, rebuild| BUILD_DATA
+        BUILD_DATA --> BUILD_VEC["Create collection and build index"]
+        LOAD_DATA --> READY["Init BM25 / graph index / retrievers"]
         BUILD_VEC --> READY
-        DATA -.->|提供图数据/文档能力| LOAD_DATA
-        DATA -.->|提供图数据/文档能力| BUILD_DATA
-        READY --> APP["uvicorn 启动 ASGI 服务"]
+        DATA -.->|graph/document capabilities| LOAD_DATA
+        DATA -.->|graph/document capabilities| BUILD_DATA
+        READY --> APP["uvicorn starts the ASGI service"]
 
-        CACHE --> REDIS_CONN["Redis 连接"]
+        CACHE --> REDIS_CONN["Redis connection"]
         LIMITER --> REDIS_CONN
-        REDIS_CONN -->|不可用且 required=false| MEM_FALLBACK["降级进程内会话/缓存<br/>限流放行"]
-        REDIS_CONN -->|不可用且 required=true| BOOT_FAIL
+        REDIS_CONN -->|unavailable, required=false| MEM_FALLBACK["Fall back to in-process sessions/cache<br/>rate limiting bypassed"]
+        REDIS_CONN -->|unavailable, required=true| BOOT_FAIL
     end
 
     %% ==================== Web / API ====================
-    subgraph WEB["Web / API 层"]
-        CLIENT["浏览器 / Next.js 前端"] --> NGINX["Nginx<br/>/ → 前端 · /api → 后端"]
-        APP --> API["FastAPI 应用<br/>WebServiceHandler.create_app"]
+    subgraph WEB["Web / API Layer"]
+        CLIENT["Browser / Next.js frontend"] --> NGINX["Nginx<br/>/ → frontend · /api → backend"]
+        APP --> API["FastAPI app<br/>WebServiceHandler.create_app"]
         NGINX --> API
-        API --> HEALTH["/health<br/>含 Redis ping"]
-        API --> STATIC["静态文件 / SPA fallback"]
-        API --> LIMIT{"Redis 固定窗口限流<br/>默认 60/min · chat 30/min"}
-        LIMIT -->|超限| TOO_MANY["429 + Retry-After"]
+        API --> HEALTH["/health<br/>includes Redis ping"]
+        API --> STATIC["Static files / SPA fallback"]
+        API --> LIMIT{"Redis fixed-window rate limit<br/>default 60/min · chat 30/min"}
+        LIMIT -->|exceeded| TOO_MANY["429 + Retry-After"]
         LIMIT --> CHAT_API["/api/chat"]
         LIMIT --> STREAM_API["/api/chat_stream<br/>SSE + [DONE]"]
         LIMIT --> RECIPE_API["/api/recipes/*"]
@@ -55,57 +203,57 @@ flowchart TD
         LIMIT --> FEEDBACK_API["/api/feedback*"]
     end
 
-    %% ==================== 聊天主流程 ====================
-    subgraph CHATFLOW["聊天主流程"]
-        CACHE_CHECK{"语义缓存命中？<br/>同 session · 同 topic<br/>相似度 ≥ 0.75"}
-        CACHED["直接返回缓存答案"]
-        STATE["读取会话状态<br/>active_recipe / active_topic<br/>constraints / recent_user_queries"]
+    %% ==================== Chat Flow ====================
+    subgraph CHATFLOW["Chat Flow"]
+        CACHE_CHECK{"Semantic cache hit?<br/>same session · same topic<br/>similarity ≥ 0.75"}
+        CACHED["Return the cached answer"]
+        STATE["Load session state<br/>active_recipe / active_topic<br/>constraints / recent_user_queries"]
         ROUTE["IntelligentQueryRouter.route_query"]
         RESP{"response_type<br/>+ needs_retrieval"}
-        CLARIFY["clarify<br/>返回澄清问题"]
-        DIRECT["chitchat / out_of_scope<br/>直接回答或固定拒识"]
-        NO_DATA["no_data<br/>明确告知证据不足"]
-        ANSWER["answer<br/>进入生成层"]
-        UPDATE["update_state_after_turn<br/>更新 active_recipe / constraints"]
-        WRITE_CACHE["写语义缓存<br/>no_data / clarify / refuse 不写"]
-        WRITE_CTX["写会话上下文"]
+        CLARIFY["clarify<br/>ask a clarifying question"]
+        DIRECT["chitchat / out_of_scope<br/>direct answer or fixed refusal"]
+        NO_DATA["no_data<br/>state insufficient evidence"]
+        ANSWER["answer<br/>enter the generation layer"]
+        UPDATE["update_state_after_turn<br/>update active_recipe / constraints"]
+        WRITE_CACHE["Write semantic cache<br/>skip no_data / clarify / refuse"]
+        WRITE_CTX["Write session context"]
 
         CHAT_API --> CACHE_CHECK
         STREAM_API --> CACHE_CHECK
-        CACHE_CHECK -->|命中| CACHED
+        CACHE_CHECK -->|hit| CACHED
         CACHED --> WRITE_CTX
-        CACHE_CHECK -->|未命中| STATE
+        CACHE_CHECK -->|miss| STATE
         STATE --> ROUTE
         ROUTE --> RESP
         RESP -->|clarify| CLARIFY
-        RESP -->|refuse 或不检索| DIRECT
+        RESP -->|refuse or no retrieval| DIRECT
         RESP -->|no_data| NO_DATA
-        RESP -->|answer 且有证据| ANSWER
+        RESP -->|answer with evidence| ANSWER
         CLARIFY --> UPDATE
         UPDATE --> WRITE_CACHE
         UPDATE --> WRITE_CTX
     end
 
-    %% ==================== 查询路由包 ====================
-    subgraph ROUTING["查询路由包 query_routing"]
-        UNDERSTAND["understanding.py<br/>LLM 结构化输出 → 解析 → 一次修复"]
-        RULES["rules.py + slots.py<br/>规则路由 / 追问 / 槽位归一化"]
+    %% ==================== Query Routing Package ====================
+    subgraph ROUTING["Query Routing Package query_routing"]
+        UNDERSTAND["understanding.py<br/>LLM structured output → parse → one repair"]
+        RULES["rules.py + slots.py<br/>rule routing / follow-ups / slot normalization"]
         UNDER_OK["Understanding<br/>intents / entities / slots / context"]
-        KEYS["RouteKeySpec × 12<br/>证据形态 / engine / validator / 阈值"]
-        POLICY["policy.py<br/>确定性生成 RoutePlan"]
-        THRESHOLD["置信度门控<br/>min_execute / retrieval_override / no_retrieval"]
-        PLAN["RoutePlan<br/>单/多子计划 · top_k · depends_on"]
-        EXEC["evidence.py<br/>按 engine 执行"]
-        PARALLEL["单子计划直接执行<br/>多子计划 Semaphore(4) 并行<br/>gather 保持顺序"]
+        KEYS["RouteKeySpec × 12<br/>evidence profile / engine / validator / thresholds"]
+        POLICY["policy.py<br/>deterministic RoutePlan"]
+        THRESHOLD["Confidence gates<br/>min_execute / retrieval_override / no_retrieval"]
+        PLAN["RoutePlan<br/>single/multi sub-plan · top_k · depends_on"]
+        EXEC["evidence.py<br/>dispatch by engine"]
+        PARALLEL["Single sub-plan runs inline<br/>multi sub-plan Semaphore(4)<br/>gather preserves order"]
         VALIDATE["validators.py<br/>complete / partial / missing"]
-        TEXT_RETRY["retry_hint=text<br/>补一次文本检索"]
-        MERGE["合并去重<br/>保留 sub_query 元数据"]
+        TEXT_RETRY["retry_hint=text<br/>one extra text search"]
+        MERGE["Merge and dedupe<br/>keep sub_query metadata"]
         ANALYSIS["QueryAnalysis<br/>route_key / engine / response_type<br/>evidence_status / sub_evidence"]
         TELEMETRY["data/logs/route_decisions.jsonl"]
 
         ROUTE --> UNDERSTAND
-        UNDERSTAND -->|成功| UNDER_OK
-        UNDERSTAND -->|失败| RULES
+        UNDERSTAND -->|success| UNDER_OK
+        UNDERSTAND -->|failure| RULES
         RULES --> UNDER_OK
         KEYS -.-> POLICY
         UNDER_OK --> POLICY
@@ -113,26 +261,26 @@ flowchart TD
         THRESHOLD --> PLAN
         PLAN -->|clarify| CLARIFY
         PLAN -->|chitchat / out_of_scope| DIRECT
-        PLAN -->|需要检索| EXEC
+        PLAN -->|needs retrieval| EXEC
         EXEC --> PARALLEL
         PARALLEL --> VALIDATE
         VALIDATE -->|retry_hint=text| TEXT_RETRY
         TEXT_RETRY --> VALIDATE
         VALIDATE --> MERGE
-        MERGE -->|全部 missing| NO_DATA
+        MERGE -->|all missing| NO_DATA
         MERGE --> ANALYSIS
         ANALYSIS -.->|QueryAnalysis| RESP
         ROUTE -.-> TELEMETRY
     end
 
-    %% ==================== 证据引擎 ====================
-    subgraph ENGINES["证据引擎（按 SubPlan.engine 分发）"]
-        GE["graph_entity<br/>食材 / 步骤时间 / 概览<br/>推荐候选 / 营养数值 / 功效"]
+    %% ==================== Evidence Engines ====================
+    subgraph ENGINES["Evidence Engines (dispatch by SubPlan.engine)"]
+        GE["graph_entity<br/>ingredients / step time / overview<br/>recommendations / nutrition / benefits"]
         GR["graph_relation<br/>graph_rag_search"]
-        HY["hybrid<br/>三路召回 + RRF"]
-        CO["combined<br/>文本 + 图并行"]
+        HY["hybrid<br/>three-way recall + RRF"]
+        CO["combined<br/>text + graph in parallel"]
         TIPS["tips_*<br/>pairing / safety / technique / rule"]
-        NONE["none<br/>不检索"]
+        NONE["none<br/>no retrieval"]
 
         EXEC --> GE
         EXEC --> GR
@@ -140,22 +288,22 @@ flowchart TD
         EXEC --> CO
         EXEC --> TIPS
         EXEC --> NONE
-        GE -.->|图谱无结果，转文本兜底| HY
+        GE -.->|empty graph result, fall back to text| HY
     end
 
-    %% ==================== 检索内部实现 ====================
-    subgraph RETRIEVAL["检索内部实现"]
-        DUAL["双层检索<br/>实体级 + 主题级"]
-        VECTOR["Milvus 向量检索<br/>一跳邻居增强"]
-        BM25["BM25<br/>jieba 分词"]
-        RRF["RRF 融合"]
-        PARENT["父文档回填<br/>默认开启，可配置"]
-        ROUND["Round-robin 合并<br/>图结果优先"]
-        GQUERY["图查询理解<br/>entity_relation / multi_hop<br/>subgraph / path_finding"]
-        MULTIHOP["多跳遍历<br/>最大 3 跳 + hub 剪枝"]
-        SUBGRAPH["知识子图抽取<br/>最大 100 节点"]
-        GREASON["图结构推理<br/>推理链校验"]
-        RANK["图结构 + 词法 + 类型排序"]
+    %% ==================== Retrieval Internals ====================
+    subgraph RETRIEVAL["Retrieval Internals"]
+        DUAL["Dual-level retrieval<br/>entity-level + topic-level"]
+        VECTOR["Milvus vector search<br/>one-hop neighbor boost"]
+        BM25["BM25<br/>jieba tokenization"]
+        RRF["RRF fusion"]
+        PARENT["Parent-document backfill<br/>enabled by default, configurable"]
+        ROUND["Round-robin merge<br/>graph results first"]
+        GQUERY["Graph query understanding<br/>entity_relation / multi_hop<br/>subgraph / path_finding"]
+        MULTIHOP["Multi-hop traversal<br/>max 3 hops + hub pruning"]
+        SUBGRAPH["Knowledge subgraph extraction<br/>max 200 nodes"]
+        GREASON["Graph reasoning<br/>reasoning-chain validation"]
+        RANK["Ranking by graph + lexical + type"]
 
         HY --> DUAL
         HY --> VECTOR
@@ -177,20 +325,20 @@ flowchart TD
         GR --> ROUND
     end
 
-    %% ==================== 生成层 ====================
-    subgraph GENERATION["生成层"]
-        GEN_DIRECT["generate_direct_answer<br/>闲聊 / 域外固定拒识"]
-        NOEVID["generate_adaptive_answer<br/>无证据 Prompt"]
-        SINGLE["单意图<br/>一次 LLM 调用<br/>howto ≥3 步修复分条"]
-        SECTION["多意图<br/>按子问题分节"]
-        ORDER["最多 4 路并行生成<br/>按原顺序输出<br/>流式 howto 首节先修复"]
-        STREAM["流式输出<br/>SSE chunk"]
-        NONSTREAM["非流式输出<br/>完整 JSON"]
-        STREAM_FAIL["流式失败 → 非流式兜底"]
+    %% ==================== Generation Layer ====================
+    subgraph GENERATION["Generation Layer"]
+        GEN_DIRECT["generate_direct_answer<br/>chitchat / out-of-scope refusal"]
+        NOEVID["generate_adaptive_answer<br/>no-evidence prompt"]
+        SINGLE["Single intent<br/>one LLM call<br/>repair howto with ≥3 steps"]
+        SECTION["Multi-intent<br/>section per sub-question"]
+        ORDER["Up to 4 parallel generations<br/>emit in original order<br/>repair the first streaming howto section"]
+        STREAM["Streaming<br/>SSE chunks"]
+        NONSTREAM["Non-streaming<br/>complete JSON"]
+        STREAM_FAIL["Streaming failure → non-streaming fallback"]
 
         DIRECT --> GEN_DIRECT
-        ANSWER -->|单意图| SINGLE
-        ANSWER -->|多意图| SECTION
+        ANSWER -->|single intent| SINGLE
+        ANSWER -->|multi-intent| SECTION
         SECTION --> ORDER
         NO_DATA --> NOEVID
         SINGLE --> STREAM
@@ -201,20 +349,20 @@ flowchart TD
         NOEVID --> NONSTREAM
         GEN_DIRECT --> STREAM
         GEN_DIRECT --> NONSTREAM
-        STREAM -.->|失败| STREAM_FAIL
+        STREAM -.->|failure| STREAM_FAIL
         STREAM_FAIL --> NONSTREAM
         STREAM --> UPDATE
         NONSTREAM --> UPDATE
     end
 
-    %% ==================== 存储与可观测性 ====================
-    subgraph STORAGE["存储与可观测性"]
+    %% ==================== Storage & Observability ====================
+    subgraph STORAGE["Storage and Observability"]
         NEO4J_DB[("Neo4j<br/>Recipe / Ingredient / Step")]
-        MILVUS_DB[("Milvus<br/>向量索引")]
-        REDIS_DB[("Redis<br/>会话状态 / 语义缓存 / 限流")]
-        TIPSDOC[("data/tips<br/>相克 / 安全 / 技法 / 选菜")]
+        MILVUS_DB[("Milvus<br/>vector index")]
+        REDIS_DB[("Redis<br/>session state / semantic cache / rate limit")]
+        TIPSDOC[("data/tips<br/>pairing / safety / technique / meal selection")]
         LOGS[("data/logs<br/>route_decisions / feedback")]
-        DATA_FILES[("data/recipes<br/>菜谱数据 / 图片")]
+        DATA_FILES[("data/recipes_with_images.json<br/>data/dishes recipe data / images")]
 
         REDIS_CONN --> REDIS_DB
         GE --> NEO4J_DB
@@ -223,7 +371,7 @@ flowchart TD
         HY --> MILVUS_DB
         VECTOR --> MILVUS_DB
         DUAL --> NEO4J_DB
-        TIPSDOC -.->|解析| TIPS
+        TIPSDOC -.->|parse| TIPS
         RECIPE_API --> RECIPE
         RECIPE --> DATA_FILES
         FEEDBACK_API --> LOGS
@@ -238,13 +386,13 @@ flowchart TD
         STATS_API -.-> ROUTER
     end
 
-    %% ==================== 降级与错误处理 ====================
-    subgraph FAILOVER["降级与错误处理"]
-        F_LLM["理解失败 → 规则路由"]
-        F_EVID["证据不足 → 文本补检索 / no_data"]
-        F_ROUTE["路由执行异常 → 传统 hybrid<br/>evidence_status=fallback"]
-        F_STREAM["流式异常 → 非流式"]
-        F_REDIS["Redis 不可用 → 进程内降级 / 启动失败"]
+    %% ==================== Fallbacks and Error Handling ====================
+    subgraph FAILOVER["Fallbacks and Error Handling"]
+        F_LLM["Understanding failure → rule routing"]
+        F_EVID["Insufficient evidence → text retry / no_data"]
+        F_ROUTE["Routing execution error → hybrid<br/>evidence_status=fallback"]
+        F_STREAM["Streaming error → non-streaming"]
+        F_REDIS["Redis unavailable → in-process fallback / startup failure"]
     end
 
     UNDERSTAND -.-> F_LLM
@@ -253,8 +401,8 @@ flowchart TD
     STREAM -.-> F_STREAM
     REDIS_CONN -.-> F_REDIS
 
-    %% ==================== 样式 ====================
-    %% 分组底板保持中性，节点用浅色填充区分阶段；连线退到背景层
+    %% ==================== Styling ====================
+    %% Neutral group backgrounds; tinted nodes mark stages; links recede
     style BOOT fill:#fafaf7,stroke:#e1e0d9,stroke-width:1px,color:#52514e
     style WEB fill:#fafaf7,stroke:#e1e0d9,stroke-width:1px,color:#52514e
     style CHATFLOW fill:#fafaf7,stroke:#e1e0d9,stroke-width:1px,color:#52514e
@@ -266,7 +414,7 @@ flowchart TD
     style FAILOVER fill:#fafaf7,stroke:#e1e0d9,stroke-width:1px,color:#52514e
     linkStyle default stroke:#9c9a92,stroke-width:1.1px
 
-    %% 每个节点保留浅色填充；色相只表示阶段，统一低饱和，避免大色块抢文字
+    %% Keep light fills; hue denotes stage only, kept low-saturation so text stays dominant
     classDef boot fill:#edf2f7,stroke:#64748b,stroke-width:1.4px,color:#0b0b0b
     classDef web fill:#eaf2fb,stroke:#2a78d6,stroke-width:1.4px,color:#0b0b0b
     classDef route fill:#d9e7f8,stroke:#2a78d6,stroke-width:2px,color:#0b0b0b
@@ -285,3 +433,90 @@ flowchart TD
     class NEO4J_DB,MILVUS_DB,REDIS_DB,TIPSDOC,LOGS,DATA_FILES store
     class DEP_CHECK,KB_CHECK success
 ```
+
+### 3.2 Core Modules
+
+#### Graph Data Preparation (GraphDataPreparationModule)
+- **Role**: loads recipes, ingredients, steps, and relationships from Neo4j; builds structured recipe documents and chunks.
+- **Highlights**: preserves graph semantics; dual title/length chunking; chunks carry parent-document and section metadata.
+
+#### Vector Index (MilvusIndexConstructionModule)
+- **Role**: builds and manages the Milvus collection for semantic similarity search.
+- **Highlights**: BGE-small-zh-v1.5 / 512-dim; HNSW + COSINE; drops and recreates the collection on rebuild.
+
+#### Hybrid Retrieval (HybridRetrievalModule)
+- **Role**: three-way recall (dual-level graph, Milvus vector, BM25 keyword) fused with RRF.
+- **Highlights**: entity-level + topic-level retrieval; jieba tokenization; optional parent-document backfill.
+
+#### Graph RAG Retrieval (GraphRAGRetrieval)
+- **Role**: understands graph queries and adds multi-hop reasoning and subgraph evidence along relationship paths.
+- **Highlights**: max 3 hops + hub pruning; up to 200 nodes per subgraph; graph-aware reasoning and ranking.
+
+#### Intelligent Query Router (IntelligentQueryRouter)
+- **Role**: turns a user question into a `RoutePlan`, fetches evidence per engine, and returns documents plus `QueryAnalysis`.
+- **Highlights**: LLM structured understanding + rule fallback; 12 route keys; confidence gates; parallel multi-intent retrieval; evidence validation and text retry.
+
+#### Generation Integration (GenerationIntegrationModule)
+- **Role**: generates the final answer from retrieved documents and routing analysis, in streaming or non-streaming mode.
+- **Highlights**: adaptive single/multi-intent; up to 4 parallel sections emitted in order; streaming falls back to non-streaming; howto step repair.
+
+#### Session and Rate Limiting (SessionCacheManager + RedisRateLimiter)
+- **Role**: maintains multi-turn session state, semantic cache, and Redis fixed-window rate limiting.
+- **Highlights**: semantic cache keyed by session/topic; carries the active recipe and constraints across turns; degrades in-process or fails startup when Redis is unavailable.
+
+#### Recipe Recommendations (RecipeRecommendationManager)
+- **Role**: reads `data/recipes_with_images.json` and `data/dishes` to serve random recommendations, recipe details, and images.
+- **Highlights**: bypasses RAG; returns random recipes; preference fields are reserved.
+
+### 3.3 Data Flow
+
+1. **Startup and data preparation**
+   - Initialize the data, index, generation, retrieval, routing, Redis, and recommendation modules in dependency order.
+   - Collection missing: Neo4j → recipe docs → chunks → build the vector index.
+   - Collection present: load it, then load graph data and build docs/chunks.
+   - Initialize BM25, the graph index, and retrievers; degrade or exit when Redis is unavailable depending on `REDIS_REQUIRED`.
+
+2. **Query processing**
+   - Nginx → FastAPI: rate limit, load session state, and return the cached answer on a semantic-cache hit.
+   - `route_query`: LLM understanding + one repair, with rule fallback on failure; the policy layer emits a confidence-gated `RoutePlan`.
+   - Fetch evidence in parallel by `engine` (graph_entity / graph_relation / hybrid / combined / tips / none), validate, then merge.
+   - Generation emits one section for a single intent or multiple ordered sections; up to 4 run in parallel.
+   - Update session state; write the semantic cache and context when eligible.
+
+3. **Fallbacks and error handling**
+   - Understanding failure → rule routing; insufficient evidence → text retry or `no_data`.
+   - Routing execution error → hybrid retrieval with `evidence_status=fallback`.
+   - Streaming error → non-streaming; Redis unavailable → in-process fallback or startup failure.
+
+## 🛠️ Tech Stack
+
+| Layer | Stack | Responsibility |
+| --- | --- | --- |
+| Frontend | Next.js 14 · React · Tailwind CSS · Zustand · Framer Motion | Rendering, state management, animation |
+| Backend | Python 3.11 · FastAPI · uvicorn | API service, SSE streaming |
+| Retrieval | Neo4j 5.11 · Milvus 2.3.2 · BM25 (jieba) | Graph multi-hop, vector semantics, keyword recall |
+| Models | BGE-small-zh-v1.5 · OpenAI-compatible LLM | 512-dim embeddings, understanding, generation |
+| State | Redis 7 | Multi-turn sessions, semantic cache, fixed-window rate limiting |
+| Deployment | Docker Compose · Nginx | Orchestration, unified entry, reverse proxy |
+
+**🍽️ Enjoy your culinary journey!** If this project helps you, please give it a ⭐️.
+
+## 📄 License
+
+Released under the [MIT License](./LICENSE).
+
+Copyright © 2026 cookwise-ai contributors
+
+### 🔓 Permissions
+- ✅ **Commercial use** — use in commercial projects
+- ✅ **Modification** — modify the source code
+- ✅ **Distribution** — distribute original or modified code
+- ✅ **Private use** — use privately
+
+### 📝 Conditions
+- **Keep the copyright notice** — include the original copyright and license notice in all copies
+- **Keep the license** — include the MIT License in all copies
+
+### ⚠️ Disclaimer
+- The software is provided "as is", without warranty of any kind, express or implied.
+- The authors assume no liability or responsibility.
