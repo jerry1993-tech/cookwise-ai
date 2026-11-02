@@ -1,0 +1,150 @@
+{
+  "turns": 807,
+  "cases": 600,
+  "route_key_accuracy": 1.0,
+  "route_key_micro_precision": 1.0,
+  "route_key_micro_recall": 1.0,
+  "needs_retrieval_accuracy": 1.0,
+  "response_type_accuracy": 1.0,
+  "evidence_hit_rate": 1.0,
+  "evidence_checked_turns": 646,
+  "slot_accuracy": 0.9806,
+  "slot_checked_turns": 103,
+  "clarify_rate": 0.0558,
+  "expected_clarify_rate": 0.0558,
+  "false_clarify": 0,
+  "missed_clarify": 0,
+  "latency_ms_p50": 1486,
+  "latency_ms_p95": 3513,
+  "understanding_sources": {
+    "llm": 750,
+    "rule": 57
+  },
+  "by_category": {
+    "multi_turn_multi_intent": {
+      "turns": 120,
+      "route_accuracy": 1.0,
+      "needs_accuracy": 1.0,
+      "evidence_hit_rate": 1.0
+    },
+    "multi_turn_single_intent": {
+      "turns": 267,
+      "route_accuracy": 1.0,
+      "needs_accuracy": 1.0,
+      "evidence_hit_rate": 1.0
+    },
+    "single_turn_multi_intent": {
+      "turns": 120,
+      "route_accuracy": 1.0,
+      "needs_accuracy": 1.0,
+      "evidence_hit_rate": 1.0
+    },
+    "single_turn_single_intent": {
+      "turns": 300,
+      "route_accuracy": 1.0,
+      "needs_accuracy": 1.0,
+      "evidence_hit_rate": 1.0
+    }
+  },
+  "per_route_key": {
+    "chitchat": {
+      "support": 60,
+      "tp": 60,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "food_safety": {
+      "support": 71,
+      "tp": 71,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "ingredient_pairing": {
+      "support": 82,
+      "tp": 82,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "ingredient_property": {
+      "support": 82,
+      "tp": 82,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "nutrition_benefit": {
+      "support": 83,
+      "tp": 83,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "nutrition_value": {
+      "support": 57,
+      "tp": 57,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "out_of_scope": {
+      "support": 72,
+      "tp": 72,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "recipe_ingredients": {
+      "support": 96,
+      "tp": 96,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "recipe_overview": {
+      "support": 97,
+      "tp": 97,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "recipe_steps_time": {
+      "support": 96,
+      "tp": 96,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "recommend_list": {
+      "support": 84,
+      "tp": 84,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "recommend_scenario": {
+      "support": 72,
+      "tp": 72,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0
+    }
+  },
+  "elapsed_seconds": 380.3,
+  "gold": "/Users/a/PycharmProjects/VsCode_Projects/cookwise-ai/tests/gold/golden_set.jsonl",
+  "cases_requested": 600
+}

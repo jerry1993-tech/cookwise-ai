@@ -8,7 +8,7 @@
 图谱的公开签名不在本文件里改；这里只读 Neo4j。
 """
 
-import concurrent.futures
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -860,25 +860,32 @@ class EvidenceService:
     # 组合检索
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _docs_or_empty(result) -> List[Document]:
+        """gather 某一路失败时返回空列表，另一路结果照常合并。"""
+        if isinstance(result, BaseException):
+            logger.warning("组合检索子任务失败: %s", result)
+            return []
+        return result or []
+
     def combined_search(self, query: str, top_k: int) -> List[Document]:
+        """同步入口：保留原签名，内部用 asyncio 并行。"""
+        return asyncio.run(self.combined_search_async(query, top_k))
+
+    async def combined_search_async(self, query: str, top_k: int) -> List[Document]:
         """传统 + 图并行，round-robin 合并；保留旧路由器的兜底能力。"""
         traditional_k = max(1, top_k // 2)
         graph_k = max(1, top_k - traditional_k)
 
-        traditional_docs: List[Document] = []
-        graph_docs: List[Document] = []
-
-        def run_traditional():
-            nonlocal traditional_docs
-            traditional_docs = self.text.search(query, traditional_k)
-
-        def run_graph():
-            nonlocal graph_docs
-            graph_docs = self._graph_relation_docs(query, graph_k)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(run_traditional), executor.submit(run_graph)]
-            concurrent.futures.wait(futures, timeout=30)
+        # 两路都等完成再合并，不用取消去制造“假超时”：
+        # to_thread 取消不了底层同步线程，提前返回反而会丢掉慢链路的结果。
+        results = await asyncio.gather(
+            asyncio.to_thread(self.text.search, query, traditional_k),
+            asyncio.to_thread(self._graph_relation_docs, query, graph_k),
+            return_exceptions=True,
+        )
+        traditional_docs = self._docs_or_empty(results[0])
+        graph_docs = self._docs_or_empty(results[1])
 
         merged: List[Document] = []
         seen = set()

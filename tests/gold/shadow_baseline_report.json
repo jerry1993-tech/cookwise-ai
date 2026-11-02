@@ -1,0 +1,24 @@
+{
+  "turns": 54,
+  "errors": 0,
+  "error_rate": 0.0,
+  "empty_answer_rate": 0.0,
+  "route_key_accuracy": 1.0,
+  "needs_retrieval_accuracy": 1.0,
+  "response_type_accuracy": 1.0,
+  "evidence_status": {
+    "complete": 42,
+    "partial": 3,
+    "not_required": 9
+  },
+  "evidence_missing_rate": 0.0,
+  "evidence_partial_rate": 0.0556,
+  "answer_keyword_hit_rate": 1.0,
+  "answer_checked_turns": 42,
+  "latency_ms_p50": 2496,
+  "latency_ms_p95": 4897,
+  "server_latency_ms_p95": 2737,
+  "elapsed_seconds": 148.3,
+  "base_url": "http://localhost:8000",
+  "gold": "/Users/a/PycharmProjects/VsCode_Projects/cookwise-ai/tests/gold/golden_set.jsonl"
+}

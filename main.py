@@ -31,8 +31,11 @@ from rag_modules.hybrid_retrieval import HybridRetrievalModule
 from rag_modules.graph_rag_retrieval import GraphRAGRetrieval
 from rag_modules.intelligent_query_router import IntelligentQueryRouter, QueryAnalysis
 from rag_modules.session_cache_manager import SessionCacheManager
-from rag_modules.web_service_handler import WebServiceHandler
+from rag_modules.redis_store import RedisRateLimiter, create_redis_client
+from rag_modules.web_service_handler import create_app
 from rag_modules.recipe_recommendation import RecipeRecommendationManager
+
+import uvicorn
 
 class AdvancedGraphRAGSystem:
     """
@@ -61,7 +64,9 @@ class AdvancedGraphRAGSystem:
         # 系统状态
         self.system_ready = False
 
-        # 会话缓存管理器
+        # Redis 与会话缓存
+        self.redis_client = None
+        self.rate_limiter = None
         self.cache_manager = None
     
     def initialize_system(self):
@@ -121,19 +126,26 @@ class AdvancedGraphRAGSystem:
                 config=self.config
             )
 
-            # 7. 会话缓存管理器
-            print("初始化会话缓存管理器...")
+            # 7. Redis + 会话缓存管理器 + 限流器
+            print("初始化 Redis 与会话缓存...")
+            self.redis_client = create_redis_client(
+                url=getattr(self.config, "redis_url", None),
+                required=getattr(self.config, "redis_required", False),
+            )
             self.cache_manager = SessionCacheManager(
-                embedding_model=self.index_module.embeddings
+                embedding_model=self.index_module.embeddings,
+                redis_client=self.redis_client,
+                ttl_seconds=getattr(self.config, "session_ttl_seconds", 86400),
+            )
+            self.rate_limiter = RedisRateLimiter(
+                self.redis_client,
+                default_limit=getattr(self.config, "rate_limit_per_minute", 60),
+                chat_limit=getattr(self.config, "chat_rate_limit_per_minute", 30),
             )
 
             # 8. 菜谱推荐管理器
             print("初始化菜谱推荐管理器...")
             self.recipe_manager = RecipeRecommendationManager()
-
-            # 9. Web服务处理器
-            print("初始化Web服务处理器...")
-            self.web_handler = WebServiceHandler(self)   # 参数是 `self`:它把整个系统对象传Web服务处理器
 
             print("✅ 高级图RAG系统初始化完成！")
           
@@ -356,31 +368,37 @@ class AdvancedGraphRAGSystem:
 
 
     def run_web_service(self):
-        """运行Web服务模式"""
+        """运行 FastAPI/uvicorn 服务（ASGI 外壳，业务层保持同步）。"""
         if not self.system_ready:
             print("❌ 系统未就绪，请先构建知识库")
             return
 
         try:
-            # 使用Web服务处理器设置Flask应用
-            app = self.web_handler.setup_flask_app()
-            if not app:
-                print("❌ Flask应用初始化失败")
-                return
+            app = create_app(self)
 
             # canary 时用 WEB_PORT 在 8001 再起一个实例，Nginx 按比例分流
             port = int(os.getenv("WEB_PORT", "8000"))
-            print("🚀 启动Web服务...")
+            print("🚀 启动 FastAPI/uvicorn 服务...")
             print(f"📊 健康检查: http://localhost:{port}/health")
             print(f"💬 聊天API: http://localhost:{port}/api/chat")
-            print(f"🌊 流式聊天: http://localhost:{port}/api/chat/stream")
+            print(f"🌊 流式聊天: http://localhost:{port}/api/chat_stream")
             print(f"🍽️ 菜谱推荐: http://localhost:{port}/api/recipes/recommendations")
             print(f"📖 菜谱详情: http://localhost:{port}/api/recipes/<recipe_id>")
             print(f"📈 统计信息: http://localhost:{port}/api/stats")
             print("=" * 50)
 
-            # 启动Flask应用
-            app.run(host='0.0.0.0', port=port, debug=False)
+            try:
+                uvicorn.run(
+                    app,
+                    host="0.0.0.0",
+                    port=port,
+                    log_level=os.getenv("LOG_LEVEL", "info").lower(),
+                    # 限流要自己判断真实客户端，别让 uvicorn 先改写 request.client
+                    proxy_headers=False,
+                    timeout_graceful_shutdown=30,
+                )
+            finally:
+                self._cleanup()
 
         except Exception as e:
             logger.error(f"Web服务启动失败: {e}")
@@ -397,6 +415,8 @@ class AdvancedGraphRAGSystem:
             self.graph_rag_retrieval.close()
         if self.index_module:
             self.index_module.close()
+        if self.redis_client:
+            self.redis_client.close()
 
 
 def main():

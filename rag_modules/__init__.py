@@ -44,6 +44,8 @@ _LAZY = {
     "SessionCacheManager": ("session_cache_manager", "SessionCacheManager"),
     "RecipeRecommendationManager": ("recipe_recommendation", "RecipeRecommendationManager"),
     "WebServiceHandler": ("web_service_handler", "WebServiceHandler"),
+    # 生产 Web 入口（FastAPI/uvicorn）
+    "create_app": ("web_service_handler", "create_app"),
 }
 
 __all__ = list(_LAZY)

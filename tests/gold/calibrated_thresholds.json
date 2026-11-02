@@ -1,0 +1,67 @@
+{
+  "default": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "recipe_ingredients": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "recipe_steps_time": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "recipe_overview": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "ingredient_pairing": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "ingredient_property": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "recommend_list": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "recommend_scenario": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "nutrition_value": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "nutrition_benefit": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "food_safety": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "chitchat": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  },
+  "out_of_scope": {
+    "min_execute": 0.5,
+    "retrieval_override": 0.7,
+    "no_retrieval": 0.8
+  }
+}

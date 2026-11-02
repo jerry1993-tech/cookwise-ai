@@ -90,6 +90,30 @@ def test_bm25_search_without_index_returns_empty():
     assert module.bm25_search("宫保鸡丁", top_k=5) == []
 
 
+def test_hybrid_search_gathers_three_routes():
+    """asyncio.gather 的三路结果都要进入 RRF，顺序仍是 dual/vector/bm25。"""
+    module = object.__new__(HybridRetrievalModule)
+    module.config = SimpleNamespace(enable_parent_doc_retrieval=False)
+    module.dual_level_retrieval = lambda query, k: [make_doc("dual")]
+    module.vector_search_enhanced = lambda query, k: [make_doc("vector")]
+    module.bm25_search = lambda query, k: [make_doc("bm25")]
+
+    docs = module.hybrid_search("宫保鸡丁", top_k=3)
+    assert {doc.metadata["node_id"] for doc in docs} == {"dual", "vector", "bm25"}
+
+
+def test_hybrid_search_one_route_failure_is_isolated():
+    """向量路抛错时，dual 和 bm25 的结果仍然保留。"""
+    module = object.__new__(HybridRetrievalModule)
+    module.config = SimpleNamespace(enable_parent_doc_retrieval=False)
+    module.dual_level_retrieval = lambda query, k: [make_doc("dual")]
+    module.vector_search_enhanced = lambda query, k: (_ for _ in ()).throw(RuntimeError("vector down"))
+    module.bm25_search = lambda query, k: [make_doc("bm25")]
+
+    docs = module.hybrid_search("宫保鸡丁", top_k=3)
+    assert {doc.metadata["node_id"] for doc in docs} == {"dual", "bm25"}
+
+
 def test_attach_parent_documents_replaces_top_n():
     """父文档回填：前 top_n 条换成整篇菜谱，顺序和条数不变。"""
     parent = Document(page_content="整篇父菜谱", metadata={"node_id": "A"})
