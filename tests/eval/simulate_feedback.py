@@ -3,7 +3,7 @@
 模拟用户反馈：给 /api/feedback 打点赞、点踩和纠错，验证落盘与统计。
 
 用法：
-    python scripts/eval/simulate_feedback.py --base-url http://localhost:8000
+    python tests/eval/simulate_feedback.py --base-url http://localhost:8000
 """
 
 import argparse

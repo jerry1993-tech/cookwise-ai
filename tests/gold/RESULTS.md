@@ -8,7 +8,7 @@
 ## 1. 最终黄金集指标
 
 最终代码跑完 600 条 case，汇总在 `eval_report.json`；逐条预测可用
-`scripts/eval/eval_routing.py` 重新生成（本轮生成的 `predictions.jsonl` 已清理）。
+`tests/eval/eval_routing.py` 重新生成（本轮生成的 `predictions.jsonl` 已清理）。
 
 | 指标 | 结果 |
 | --- | --- |

@@ -1,6 +1,6 @@
 # 黄金集标注口径
 
-本目录的黄金集由 `scripts/eval/generate_gold.py` 从项目真实数据合成：
+本目录的黄金集由 `tests/eval/generate_gold.py` 从项目真实数据合成：
 
 - 菜名、食材、步骤、热量、营养描述：Neo4j + `data/` 下 323 篇菜谱原文
 - 相克、技法、食品安全、配菜规则：`data/` 下 tips 文档
@@ -108,7 +108,7 @@
 
 ## 评测指标
 
-`scripts/eval/eval_routing.py` 输出：
+`tests/eval/eval_routing.py` 输出：
 
 - `route_key_accuracy`：每轮预测的路由键集合与标注完全一致的比例（最硬指标之一）
 - `route_key_micro_precision/recall`：按路由键展开的微平均
@@ -123,8 +123,8 @@
 
 ```bash
 # 需要 Neo4j 可用；Milvus 不需要
-python scripts/eval/generate_gold.py
-python scripts/eval/validate_gold.py
+python tests/eval/generate_gold.py
+python tests/eval/validate_gold.py
 ```
 
 `validate_gold.py` 完全离线，CI 会跑；它检查 ID、比例、路由键覆盖、槽位和证据实体是否自洽。

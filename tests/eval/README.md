@@ -1,7 +1,7 @@
 # 路由评测与阈值校准
 
 黄金集、评测、校准、影子回放的完整流程。标注口径见
-[`tests/gold/ANNOTATION.md`](../../tests/gold/ANNOTATION.md)。
+[`tests/gold/ANNOTATION.md`](../gold/ANNOTATION.md)。
 
 ## 0. 前置
 
@@ -16,8 +16,8 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 ## 1. 生成与校验黄金集
 
 ```bash
-python scripts/eval/generate_gold.py
-python scripts/eval/validate_gold.py
+python tests/eval/generate_gold.py
+python tests/eval/validate_gold.py
 ```
 
 | 产物 | 说明 |
@@ -31,7 +31,7 @@ python scripts/eval/validate_gold.py
 ## 2. 跑全量评测
 
 ```bash
-python scripts/eval/eval_routing.py --workers 4
+python tests/eval/eval_routing.py --workers 4
 ```
 
 进程内初始化完整系统，按生产路径调用 `route_query` / `update_state_after_turn`，
@@ -55,7 +55,7 @@ python scripts/eval/eval_routing.py --workers 4
 ## 3. 按路由键校准阈值
 
 ```bash
-python scripts/eval/calibrate_thresholds.py
+python tests/eval/calibrate_thresholds.py
 ```
 
 输入 `predictions.jsonl`，用生产 `RoutePolicy` 回放不同阈值，不重新调用 LLM：
@@ -76,7 +76,7 @@ python scripts/eval/calibrate_thresholds.py
 
 ```bash
 ROUTE_THRESHOLDS_PATH=tests/gold/calibrated_thresholds.json \
-  python scripts/eval/eval_routing.py --workers 4 \
+  python tests/eval/eval_routing.py --workers 4 \
   --out tests/gold/eval_report_calibrated.json \
   --predictions tests/gold/predictions_calibrated.jsonl
 ```
@@ -91,9 +91,9 @@ ROUTE_THRESHOLDS_PATH=tests/gold/calibrated_thresholds.json \
 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python main.py
 
 # 终端 B：回放
-python scripts/eval/shadow_replay.py --limit 20
-python scripts/eval/shadow_replay.py --sample 40   # 按固定间隔抽样，覆盖四个分类
-python scripts/eval/shadow_replay.py               # 全量
+python tests/eval/shadow_replay.py --limit 20
+python tests/eval/shadow_replay.py --sample 40   # 按固定间隔抽样，覆盖四个分类
+python tests/eval/shadow_replay.py               # 全量
 ```
 
 每轮请求后从 `data/logs/route_decisions.jsonl` 取回真实决策，与黄金集对比。
@@ -116,7 +116,7 @@ python scripts/eval/shadow_replay.py               # 全量
 没有前端入口时可以先模拟：
 
 ```bash
-python scripts/eval/simulate_feedback.py --limit 6
+python tests/eval/simulate_feedback.py --limit 6
 ```
 
 ## 5. Canary（临时）
@@ -138,13 +138,13 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python main.py
 
 ```bash
 # 基线：直连 8000
-python scripts/eval/shadow_replay.py --base-url http://localhost:8000 \
+python tests/eval/shadow_replay.py --base-url http://localhost:8000 \
   --sample 40 --route-log data/logs/route_decisions_backend.jsonl \
   --out tests/gold/shadow_baseline_turns.jsonl \
   --report tests/gold/shadow_baseline_report.json
 
 # canary：经 Nginx，用请求头强制进 8001
-python scripts/eval/shadow_replay.py --base-url http://localhost \
+python tests/eval/shadow_replay.py --base-url http://localhost \
   --sample 40 --header 'X-Canary: 1' \
   --route-log data/logs/route_decisions_canary.jsonl \
   --out tests/gold/shadow_canary_turns.jsonl \
@@ -168,12 +168,12 @@ python scripts/eval/shadow_replay.py --base-url http://localhost \
 ```bash
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 
-python scripts/eval/generate_gold.py
-python scripts/eval/validate_gold.py
-python scripts/eval/eval_routing.py --workers 4
-python scripts/eval/calibrate_thresholds.py
+python tests/eval/generate_gold.py
+python tests/eval/validate_gold.py
+python tests/eval/eval_routing.py --workers 4
+python tests/eval/calibrate_thresholds.py
 ROUTE_THRESHOLDS_PATH=tests/gold/calibrated_thresholds.json \
-  python scripts/eval/eval_routing.py --workers 4 \
+  python tests/eval/eval_routing.py --workers 4 \
   --out tests/gold/eval_report_calibrated.json \
   --predictions tests/gold/predictions_calibrated.jsonl
 ```

@@ -10,8 +10,8 @@
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python main.py
 
 用法：
-    python scripts/eval/shadow_replay.py --limit 20
-    python scripts/eval/shadow_replay.py --base-url http://localhost:8001
+    python tests/eval/shadow_replay.py --limit 20
+    python tests/eval/shadow_replay.py --base-url http://localhost:8001
 """
 
 import argparse

@@ -12,7 +12,7 @@
 - tests/gold/entities.json（校验用的离线实体快照）
 
 用法：
-    python scripts/eval/generate_gold.py
+    python tests/eval/generate_gold.py
 """
 
 import argparse

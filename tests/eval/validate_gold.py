@@ -10,7 +10,7 @@
 - response_type / needs_retrieval / 路由键互相不矛盾
 
 用法：
-    python scripts/eval/validate_gold.py
+    python tests/eval/validate_gold.py
 """
 
 import argparse

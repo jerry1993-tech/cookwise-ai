@@ -7,10 +7,10 @@
 
 用法：
     # 先抽 20 条看看
-    python scripts/eval/eval_routing.py --limit 20
+    python tests/eval/eval_routing.py --limit 20
 
     # 全量，4 个 case 并发
-    python scripts/eval/eval_routing.py --workers 4
+    python tests/eval/eval_routing.py --workers 4
 
 输出：
     tests/gold/eval_report.json

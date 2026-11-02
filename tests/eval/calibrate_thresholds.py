@@ -10,9 +10,9 @@
 - 输出可直接给 ROUTE_THRESHOLDS_PATH 使用
 
 用法：
-    python scripts/eval/calibrate_thresholds.py
+    python tests/eval/calibrate_thresholds.py
     ROUTE_THRESHOLDS_PATH=tests/gold/calibrated_thresholds.json \
-        python scripts/eval/eval_routing.py
+        python tests/eval/eval_routing.py
 """
 
 import argparse

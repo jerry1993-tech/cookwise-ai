@@ -386,8 +386,8 @@ sub_queries / evidence_status / sub_evidence / doc_count / latency_ms / error
 python -m pytest -q tests/test_query_routing.py
 
 # 黄金集：本地脚本，需 Neo4j / Milvus / LLM
-python scripts/eval/eval_routing.py --limit 20
-python scripts/eval/eval_routing.py --workers 4
+python tests/eval/eval_routing.py --limit 20
+python tests/eval/eval_routing.py --workers 4
 
 # 真实多轮 E2E：需后端已启动
 python tests/e2e/multiturn_e2e.py
@@ -396,7 +396,7 @@ python tests/e2e/multiturn_e2e.py
 python tests/test_graph_rag_verification.py
 ```
 
-`scripts/eval/`、`tests/e2e/`、`tests/gold/` 是本地工具目录，默认不进仓库。
+`tests/eval/`、`tests/e2e/`、`tests/gold/` 是本地评测与测试工具目录，不参与运行时启动。
 
 改动涉及路由行为时，至少跑单测 + 黄金集；涉及多轮、生成或流式时再跑 E2E。
 如果改了阈值、Prompt 或规则顺序，必须对比改动前后的黄金集报告，不能只看单条案例。
